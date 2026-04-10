@@ -1,0 +1,21 @@
+query,expected_answer_id
+How many lectures can I miss before the university takes action?,qa_16
+What happens if I keep missing classes for three weeks in a row?,qa_18
+Do I need to tell someone if I can't make it to a lecture?,qa_35
+How does the university mark whether I showed up to a session?,qa_14
+What percentage of classes do I need to attend each month?,qa_29
+What is the attendance rule for students on a student visa?,qa_46
+What counts as being engaged with my studies?,qa_25
+Can my registration be terminated for not attending?,qa_48
+When is the exam timetable published for the special assessment period?,qa_117
+Can I ask for my exam to be moved to a different time?,qa_121
+Where do students with extra time or adjustments sit their exams?,qa_120
+How much does an en-suite room at Loughborough cost for the 2025-26 year?,qa_127
+What are the hall fees for a standard room over 13 weeks?,qa_123
+What percentage of students at Loughborough got a first class degree in 2023/24?,qa_163
+What is the degree outcomes framework used by UK universities?,qa_166
+When do I have to agree to the university terms and conditions?,qa_204
+What does the Student Charter cover?,qa_205
+What are my rights if the university breaks the accommodation licence agreement?,qa_521
+How do I make a complaint about my halls of residence?,qa_522
+What happens to my belongings if I leave them in my room after moving out?,qa_526

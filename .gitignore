@@ -1,0 +1,14 @@
+.env
+API KEY.txt
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/processed/
+data/raw/
+data/raw_docs/
+*.faiss
+*.json
+.pytest_cache/
+node_modules/
+.DS_Store
