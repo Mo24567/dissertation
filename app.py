@@ -20,6 +20,8 @@ st.markdown(
 .app-subtitle {
     font-size: 0.95rem; opacity: 0.5; margin-bottom: 2.5rem;
 }
+
+/* ── Answer card (tier 1 — high confidence Q&A) ── */
 .answer-card {
     padding: 1.25rem 1.5rem;
     border-radius: 12px;
@@ -37,24 +39,84 @@ st.markdown(
     height: 3px; border-radius: 2px;
     background: rgba(0,0,0,0.08); margin-bottom: 0.9rem;
 }
-.confidence-bar {
-    height: 3px; border-radius: 2px; background: #22c55e;
+.confidence-bar { height: 3px; border-radius: 2px; background: #22c55e; }
+
+/* ── Result mode badges ── */
+.result-mode-badge {
+    display: inline-block; font-size: 0.7rem; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 0.2rem 0.55rem; border-radius: 99px; margin-bottom: 0.9rem;
 }
-.confidence-low .confidence-bar { background: #f59e0b; }
-@media (prefers-color-scheme: dark) {
-    .confidence-bar-wrap { background: rgba(255,255,255,0.1); }
+.badge-qa       { background: rgba(34,197,94,0.12);   color: #15803d; }
+.badge-qa-low   { background: rgba(245,158,11,0.12);  color: #b45309; }
+.badge-grounded { background: rgba(139,92,246,0.12);  color: #6d28d9; }
+.badge-llm      { background: rgba(59,130,246,0.12);  color: #1d4ed8; }
+.badge-none     { background: rgba(156,163,175,0.15); color: #6b7280; }
+
+/* ── Score pills ── */
+.score-pill {
+    display: inline-block; font-size: 0.68rem; font-weight: 700;
+    letter-spacing: 0.04em; padding: 0.15rem 0.45rem;
+    border-radius: 99px; vertical-align: middle;
 }
-.chunk-card {
+.score-high { background: rgba(34,197,94,0.12);  color: #15803d; }
+.score-mid  { background: rgba(245,158,11,0.12); color: #b45309; }
+.score-low  { background: rgba(239,68,68,0.10);  color: #b91c1c; }
+
+/* ── Candidate cards (tier 2 — low confidence list) ── */
+.candidate-card {
+    padding: 1rem 1.25rem;
+    border-radius: 10px;
+    border: 1px solid rgba(0,0,0,0.08);
+    margin-bottom: 0.75rem;
+}
+.candidate-rank {
+    font-size: 0.7rem; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: #9ca3af; margin-bottom: 0.35rem;
+}
+.candidate-question {
+    font-size: 0.9rem; font-weight: 600;
+    margin-bottom: 0.45rem; line-height: 1.4;
+}
+.candidate-answer { font-size: 0.875rem; line-height: 1.55; opacity: 0.8; }
+.candidate-meta   { font-size: 0.75rem; opacity: 0.4; margin-top: 0.5rem; }
+
+/* ── Alt cards (tier 1 alternatives expander) ── */
+.alt-card {
+    padding: 0.85rem 1.1rem;
+    border-radius: 9px;
+    border: 1px solid rgba(0,0,0,0.07);
+    background: rgba(0,0,0,0.01);
+    margin-bottom: 0.6rem;
+}
+.alt-question { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem; line-height: 1.4; }
+.alt-answer   { font-size: 0.82rem; line-height: 1.5; opacity: 0.65; }
+.alt-meta     { font-size: 0.72rem; opacity: 0.35; margin-top: 0.4rem; }
+
+/* ── Info cards (tier 3 & 4) ── */
+.found-card {
     padding: 1.25rem 1.5rem;
     border-radius: 12px;
-    border-left: 4px solid #f59e0b;
-    background: rgba(245,158,11,0.05);
+    border-left: 4px solid #8b5cf6;
+    background: rgba(139,92,246,0.05);
     margin-bottom: 1rem;
 }
-.chunk-label {
-    font-size: 0.8rem; font-weight: 600;
-    color: #b45309; margin-bottom: 0.5rem;
-    text-transform: uppercase; letter-spacing: 0.05em;
+.no-match-card {
+    padding: 1.25rem 1.5rem;
+    border-radius: 12px;
+    border: 1px dashed rgba(0,0,0,0.15);
+    background: rgba(0,0,0,0.015);
+    margin-bottom: 1rem;
+}
+
+/* ── LLM answer cards ── */
+.llm-grounded-card {
+    padding: 1.25rem 1.5rem;
+    border-radius: 12px;
+    border-left: 4px solid #8b5cf6;
+    background: rgba(139,92,246,0.05);
+    margin-bottom: 1rem;
 }
 .llm-card {
     padding: 1.25rem 1.5rem;
@@ -63,62 +125,66 @@ st.markdown(
     background: rgba(59,130,246,0.05);
     margin-bottom: 1rem;
 }
-.llm-label {
-    font-size: 0.8rem; font-weight: 600;
-    color: #1d4ed8; margin-bottom: 0.5rem;
-    text-transform: uppercase; letter-spacing: 0.05em;
-}
 .llm-disclaimer {
     font-size: 0.8rem; opacity: 0.55;
     margin-top: 0.75rem; font-style: italic;
 }
-.ai-link {
-    font-size: 0.85rem; opacity: 0.6; margin-top: 1rem;
-}
-.empty-state {
-    text-align: center; padding: 4rem 1rem; opacity: 0.35;
-}
+
+/* ── Retrieval trail ── */
 .retrieval-trail {
     display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
     font-size: 0.75rem; opacity: 0.5; margin-bottom: 1rem;
 }
 .trail-step { display: flex; align-items: center; gap: 0.3rem; }
-.trail-sep { opacity: 0.3; }
+.trail-sep  { opacity: 0.3; }
 .trail-pass { color: #16a34a; }
 .trail-fail { color: #dc2626; }
+.trail-warn { color: #d97706; }
 .trail-skip { color: #9ca3af; }
-.result-mode-badge {
-    display: inline-block; font-size: 0.7rem; font-weight: 600;
-    letter-spacing: 0.06em; text-transform: uppercase;
-    padding: 0.2rem 0.55rem; border-radius: 99px; margin-bottom: 0.9rem;
+
+/* ── Misc ── */
+.section-heading {
+    font-size: 0.78rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; opacity: 0.4; margin-bottom: 0.75rem;
 }
-.badge-qa   { background: rgba(34,197,94,0.12);  color: #15803d; }
-.badge-chunk{ background: rgba(245,158,11,0.12); color: #b45309; }
-.badge-llm  { background: rgba(59,130,246,0.12); color: #1d4ed8; }
-.badge-none { background: rgba(156,163,175,0.15);color: #6b7280; }
+.empty-state { text-align: center; padding: 4rem 1rem; opacity: 0.35; }
+
+/* ── Dark mode ── */
 @media (prefers-color-scheme: dark) {
-    .answer-card { border-color: rgba(255,255,255,0.1); }
+    .answer-card        { border-color: rgba(255,255,255,0.1); }
+    .confidence-bar-wrap{ background: rgba(255,255,255,0.1); }
+    .candidate-card     { border-color: rgba(255,255,255,0.09); }
+    .alt-card           { border-color: rgba(255,255,255,0.07); background: rgba(255,255,255,0.01); }
+    .no-match-card      { border-color: rgba(255,255,255,0.12); background: rgba(255,255,255,0.02); }
     .trail-pass { color: #4ade80; }
     .trail-fail { color: #f87171; }
-    .badge-qa   { background: rgba(34,197,94,0.15);  color: #4ade80; }
-    .badge-chunk{ background: rgba(245,158,11,0.15); color: #fbbf24; }
-    .badge-llm  { background: rgba(59,130,246,0.15); color: #60a5fa; }
+    .trail-warn { color: #fbbf24; }
+    .badge-qa       { background: rgba(34,197,94,0.15);   color: #4ade80; }
+    .badge-qa-low   { background: rgba(245,158,11,0.15);  color: #fbbf24; }
+    .badge-grounded { background: rgba(139,92,246,0.15);  color: #a78bfa; }
+    .badge-llm      { background: rgba(59,130,246,0.15);  color: #60a5fa; }
+    .score-high { background: rgba(34,197,94,0.15);  color: #4ade80; }
+    .score-mid  { background: rgba(245,158,11,0.15); color: #fbbf24; }
+    .score-low  { background: rgba(239,68,68,0.12);  color: #f87171; }
 }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
+HIGH_CONF_THRESHOLD = 0.75
 
-@st.cache_resource
+
+@st.cache_resource(show_spinner=False)
 def get_retriever():
     try:
         return HybridRetriever()
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         return None
 
 
-retriever = get_retriever()
+with st.spinner("Loading knowledge base..."):
+    retriever = get_retriever()
 
 if retriever is None:
     st.error(
@@ -128,17 +194,18 @@ if retriever is None:
     )
     st.stop()
 
-# Initialise session state
+# ── Session state ────────────────────────────────────────────────────────────
 for _key, _default in [
-    ("show_llm", False),
     ("last_query", ""),
     ("last_result", None),
-    ("llm_override", None),
+    ("llm_answer", None),   # result dict from LLMFallback.generate()
+    ("llm_type", None),     # "grounded" or "general"
+    ("search_error", None),
 ]:
     if _key not in st.session_state:
         st.session_state[_key] = _default
 
-# ── Header ──────────────────────────────────────────────────────────────────
+# ── Header ───────────────────────────────────────────────────────────────────
 st.markdown('<div class="app-title">Loughborough Student Assistant</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="app-subtitle">Ask a question about fees, accommodation, attendance,<br>'
@@ -165,12 +232,12 @@ if submitted:
     elif len(query_input) > 500:
         st.warning("Please keep your question under 500 characters.")
     else:
-        st.session_state.show_llm = False
-        st.session_state.llm_override = None
+        st.session_state.llm_answer = None
+        st.session_state.llm_type = None
         st.session_state.last_query = q
         st.session_state.search_error = None
         try:
-            st.session_state.last_result = retriever.search(q)
+            st.session_state.last_result = retriever.search(q, llm_enabled=False)
         except Exception as e:
             st.session_state.last_result = None
             st.session_state.search_error = str(e)
@@ -178,7 +245,6 @@ if submitted:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _qa_score(result: dict):
-    """Best Q&A score from result, or None."""
     qa = result.get("qa_result", {})
     if qa.get("ok") and qa.get("best"):
         return qa["best"].get("score")
@@ -186,63 +252,254 @@ def _qa_score(result: dict):
         return qa["best_candidate"].get("score")
     return None
 
+
 def _chunk_score(result: dict):
-    """Best chunk score from result, or None."""
     cr = result.get("chunk_result", {})
-    if cr.get("ok") and cr.get("best"):
-        return cr["best"].get("score")
     if cr.get("best"):
         return cr["best"].get("score")
     return None
 
-def _render_trail(result: dict, show_llm_requested: bool = False):
-    """Render a small retrieval trail showing what was tried."""
+
+def _score_pill(score: float) -> str:
+    if score >= HIGH_CONF_THRESHOLD:
+        cls = "score-high"
+    elif score >= 0.55:
+        cls = "score-mid"
+    else:
+        cls = "score-low"
+    return f'<span class="score-pill {cls}">{score:.2f}</span>'
+
+
+def _build_chunk_context(chunk_result: dict, max_chars: int = 3000) -> str:
+    results = chunk_result.get("results", [])
+    if not results and chunk_result.get("best"):
+        results = [chunk_result["best"]]
+    parts = []
+    total = 0
+    for r in results:
+        text = r.get("text", "")
+        source = r.get("source_file", "")
+        page = r.get("page", "")
+        snippet = f"[{source}, Page {page}]\n{text}"
+        if total + len(snippet) > max_chars:
+            break
+        parts.append(snippet)
+        total += len(snippet)
+    return "\n\n---\n\n".join(parts)
+
+
+def _render_trail(result: dict, llm_triggered: bool = False):
     mode = result.get("mode", "")
     qa_sc = _qa_score(result)
     ch_sc = _chunk_score(result)
 
     qa_ok  = mode == "qa_answer"
-    ch_ok  = mode in ("chunk_fallback", "llm_fallback", "no_answer") and result.get("chunk_result", {}).get("ok")
-    llm_ok = mode == "llm_fallback" or show_llm_requested
+    qa_low = qa_ok and qa_sc is not None and qa_sc < HIGH_CONF_THRESHOLD
+    ch_ok  = mode == "chunk_fallback"
 
     def step(icon, label, cls):
         return f'<span class="trail-step {cls}">{icon} {label}</span>'
 
     parts = []
 
-    # Q&A step
-    if qa_ok:
-        qa_txt = f"Q&amp;A match ({qa_sc:.2f})" if qa_sc else "Q&amp;A match"
-        parts.append(step("✓", qa_txt, "trail-pass"))
+    if qa_ok and not qa_low:
+        lbl = f"Q&amp;A match ({qa_sc:.2f})" if qa_sc else "Q&amp;A match"
+        parts.append(step("✓", lbl, "trail-pass"))
+    elif qa_ok and qa_low:
+        lbl = f"Q&amp;A low confidence ({qa_sc:.2f})" if qa_sc else "Q&amp;A low confidence"
+        parts.append(step("~", lbl, "trail-warn"))
     elif qa_sc is not None:
         parts.append(step("✗", f"Q&amp;A no match ({qa_sc:.2f})", "trail-fail"))
     else:
         parts.append(step("✗", "Q&amp;A no match", "trail-fail"))
 
-    # Chunk step — only show if Q&A failed
+    # Chunk step — only when Q&A fully failed (not low-confidence Q&A)
     if not qa_ok:
         parts.append('<span class="trail-sep">→</span>')
         if ch_ok:
-            ch_txt = f"Document search ({ch_sc:.2f})" if ch_sc else "Document search"
-            parts.append(step("✓", ch_txt, "trail-pass"))
+            lbl = f"Document search ({ch_sc:.2f})" if ch_sc else "Document search"
+            parts.append(step("✓", lbl, "trail-pass"))
         elif ch_sc is not None:
-            parts.append(step("✗", f"Document search no match ({ch_sc:.2f})", "trail-fail"))
+            parts.append(step("✗", f"Document search ({ch_sc:.2f})", "trail-fail"))
         else:
-            parts.append(step("✗", "Document search no match", "trail-fail"))
+            parts.append(step("✗", "Document search", "trail-fail"))
 
-    # LLM step — only show if both retrieval layers failed
-    if not qa_ok and not ch_ok:
+    if llm_triggered:
         parts.append('<span class="trail-sep">→</span>')
-        if llm_ok:
-            parts.append(step("✓", "AI answer", "trail-pass"))
-        else:
-            parts.append(step("—", "AI answer not requested", "trail-skip"))
+        parts.append(step("✓", "AI answer", "trail-pass"))
 
-    html_trail = "".join(parts)
     st.markdown(
-        f'<div class="retrieval-trail">{html_trail}</div>',
+        f'<div class="retrieval-trail">{"".join(parts)}</div>',
         unsafe_allow_html=True,
     )
+
+
+def _render_qa_high(best: dict, alternatives: list):
+    score        = best.get("score", 0)
+    answer_esc   = _html.escape(str(best.get("answer", "")))
+    source_esc   = _html.escape(str(best.get("source", "")))
+    file_esc     = _html.escape(str(best.get("source_file", "")))
+    matched_esc  = _html.escape(str(best.get("matched_question", "")))
+    page         = best.get("page", "")
+    bar_pct      = min(int(score * 100), 100)
+
+    st.markdown(
+        f"""
+<div class="answer-card">
+  <span class="result-mode-badge badge-qa">Answered from knowledge base</span>
+  <div class="confidence-bar-wrap">
+    <div class="confidence-bar" style="width:{bar_pct}%"></div>
+  </div>
+  <div class="matched-question">Matched to: \u201c{matched_esc}\u201d</div>
+  <p>{answer_esc}</p>
+  <div class="source-citation">
+    Score {score:.2f} \u00b7 {source_esc} \u2014 {file_esc}, Page {page}
+  </div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+    if alternatives:
+        n = len(alternatives)
+        label = f"{n} other possible answer{'s' if n != 1 else ''}"
+        with st.expander(label, expanded=False):
+            st.markdown(
+                '<div class="section-heading">Other matches — check if one is more relevant to your question</div>',
+                unsafe_allow_html=True,
+            )
+            for alt in alternatives:
+                alt_score = alt.get("score", 0)
+                alt_q   = _html.escape(str(alt.get("matched_question", "")))
+                alt_a   = _html.escape(str(alt.get("answer", "")))
+                alt_src = _html.escape(str(alt.get("source_file", "")))
+                alt_pg  = alt.get("page", "")
+                st.markdown(
+                    f"""
+<div class="alt-card">
+  <div class="alt-question">{alt_q} {_score_pill(alt_score)}</div>
+  <div class="alt-answer">{alt_a}</div>
+  <div class="alt-meta">{alt_src}, Page {alt_pg}</div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+
+
+def _render_qa_low(candidates: list):
+    n = len(candidates)
+    st.markdown(
+        f"""
+<div class="no-match-card">
+  <span class="result-mode-badge badge-qa-low">Low confidence matches</span>
+  <p style="margin:0;opacity:0.7;">
+    We found {n} possible answer{'s' if n != 1 else ''} but none are a strong match
+    for your question. Check whether any of the results below address what you asked
+    — if not, generate an AI answer at the bottom.
+  </p>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="section-heading">Possible matches — ranked by relevance</div>',
+        unsafe_allow_html=True,
+    )
+
+    for i, cand in enumerate(candidates, 1):
+        score   = cand.get("score", 0)
+        q_esc   = _html.escape(str(cand.get("matched_question", "")))
+        a_esc   = _html.escape(str(cand.get("answer", "")))
+        src_esc = _html.escape(str(cand.get("source_file", "")))
+        page    = cand.get("page", "")
+        st.markdown(
+            f"""
+<div class="candidate-card">
+  <div class="candidate-rank">#{i} match</div>
+  <div class="candidate-question">{q_esc} {_score_pill(score)}</div>
+  <div class="candidate-answer">{a_esc}</div>
+  <div class="candidate-meta">{src_esc}, Page {page}</div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_chunk_found(result: dict):
+    chunk_result = result.get("chunk_result", {})
+    best         = chunk_result.get("best", {}) or {}
+    n_chunks     = len(chunk_result.get("results", [chunk_result.get("best")] if chunk_result.get("best") else []))
+    file_esc     = _html.escape(str(best.get("source_file", "")))
+
+    source_hint = f" (including <strong>{file_esc}</strong>)" if file_esc else ""
+    st.markdown(
+        f"""
+<div class="found-card">
+  <span class="result-mode-badge badge-grounded">Relevant documents found</span>
+  <p style="margin:0;opacity:0.75;">
+    The knowledge base didn't contain a direct answer, but we found
+    {n_chunks} relevant passage{'s' if n_chunks != 1 else ''} in your uploaded
+    documents{source_hint}. Generate an answer below — it will be grounded in
+    those document passages, not invented.
+  </p>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_no_match():
+    st.markdown(
+        """
+<div class="no-match-card">
+  <span class="result-mode-badge badge-none">No match found</span>
+  <p style="margin:0;opacity:0.65;">
+    Neither the Q&amp;A knowledge base nor the uploaded documents contained
+    relevant information for your question. You can generate a general AI answer
+    below, though it won't be drawn from official university sources.
+  </p>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_llm_answer(llm_result: dict, llm_type: str):
+    st.divider()
+
+    if not llm_result.get("ok"):
+        reason = llm_result.get("reason", "Unknown error")
+        st.error(
+            f"AI generation failed: {reason}\n\n"
+            "This may be due to an API issue. Please try again in a moment."
+        )
+        return
+
+    answer_esc = _html.escape(llm_result["answer"])
+
+    if llm_type == "grounded":
+        st.markdown(
+            f"""
+<div class="llm-grounded-card">
+  <span class="result-mode-badge badge-grounded">Answer from your documents</span>
+  <p>{answer_esc}</p>
+  <div class="llm-disclaimer">
+    Generated using passages from uploaded university documents.
+    Always verify important information at lboro.ac.uk
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+<div class="llm-card">
+  <span class="result-mode-badge badge-llm">AI-Generated Answer</span>
+  <p>{answer_esc}</p>
+  <div class="llm-disclaimer">
+    This answer was generated by an AI model and has not been verified
+    against official university sources. Always confirm important information
+    at lboro.ac.uk
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
 
 # ── Render results ───────────────────────────────────────────────────────────
 result = st.session_state.last_result
@@ -260,132 +517,89 @@ elif result is None:
         unsafe_allow_html=True,
     )
 
-elif st.session_state.show_llm or result.get("mode") == "llm_fallback":
-    # ── LLM answer ───────────────────────────────────────────────────────────
-    _render_trail(result, show_llm_requested=True)
-
-    auto_llm = result.get("mode") == "llm_fallback"
-    if auto_llm:
-        llm_result = result.get("llm_result", {})
-    else:
-        if st.session_state.llm_override is None:
-            with st.spinner("Generating AI answer..."):
-                try:
-                    st.session_state.llm_override = retriever.llm_fallback.generate(query)
-                except Exception as e:
-                    st.session_state.llm_override = {"ok": False, "reason": str(e)}
-        llm_result = st.session_state.llm_override
-
-    if llm_result.get("ok"):
-        answer_escaped = _html.escape(llm_result["answer"])
-        st.markdown(
-            f"""
-<div class="llm-card">
-  <span class="result-mode-badge badge-llm">AI-Generated Answer</span>
-  <p>{answer_escaped}</p>
-  <div class="llm-disclaimer">
-    This answer was generated by an AI model and has not been verified
-    against official university sources. Always confirm important information
-    at lboro.ac.uk
-  </div>
-</div>""",
-            unsafe_allow_html=True,
-        )
-    else:
-        reason = llm_result.get("reason", "Unknown error")
-        st.error(
-            f"AI generation failed: {reason}\n\n"
-            "This may be due to an API issue. Please try again in a moment."
-        )
-
-elif result.get("mode") == "qa_answer":
-    # ── Q&A answer ────────────────────────────────────────────────────────────
-    _render_trail(result)
-    best = result["qa_result"]["best"]
-    answer_escaped      = _html.escape(str(best.get("answer", "")))
-    source_escaped      = _html.escape(str(best.get("source", "")))
-    source_file_escaped = _html.escape(str(best.get("source_file", "")))
-    matched_q_escaped   = _html.escape(str(best.get("matched_question", "")))
-    page  = best.get("page", "")
-    score = best.get("score", 0)
-
-    bar_pct   = min(int(score * 100), 100)
-    low_conf  = score < 0.75
-    wrap_cls  = "confidence-bar-wrap confidence-low" if low_conf else "confidence-bar-wrap"
-    conf_lbl  = "Moderate confidence" if low_conf else "High confidence"
-
-    st.markdown(
-        f"""
-<div class="answer-card">
-  <span class="result-mode-badge badge-qa">Answered from knowledge base</span>
-  <div class="{wrap_cls}"><div class="confidence-bar" style="width:{bar_pct}%"></div></div>
-  <div class="matched-question">Matched to: \u201c{matched_q_escaped}\u201d</div>
-  <p>{answer_escaped}</p>
-  <div class="source-citation">
-    {conf_lbl} \u00b7 Score {score:.2f} \u00b7 {source_escaped} \u2014 {source_file_escaped}, Page {page}
-  </div>
-</div>""",
-        unsafe_allow_html=True,
-    )
-
-    if low_conf:
-        st.caption(
-            "\u26a0\ufe0f Moderate confidence — the matched question above may not perfectly match "
-            "what you asked. If the answer looks wrong, try rephrasing or use the AI option below."
-        )
-
-    st.markdown('<div class="ai-link">', unsafe_allow_html=True)
-    if st.button("Not satisfied? Get an AI-generated answer \u2192", key="ai_btn_qa"):
-        st.session_state.show_llm = True
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
-elif result.get("mode") == "chunk_fallback":
-    # ── Chunk fallback ────────────────────────────────────────────────────────
-    _render_trail(result)
-    chunk_best          = result["chunk_result"]["best"]
-    text_escaped        = _html.escape(str(chunk_best.get("text", "")))
-    source_file_escaped = _html.escape(str(chunk_best.get("source_file", "")))
-    page                = chunk_best.get("page", "")
-
-    st.markdown(
-        f"""
-<div class="chunk-card">
-  <span class="result-mode-badge badge-chunk">Relevant Document Passage</span>
-  <div class="chunk-label">No direct answer found \u2014 showing closest match from source documents</div>
-  <p>{text_escaped}</p>
-  <div class="source-citation">{source_file_escaped}, Page {page}</div>
-</div>""",
-        unsafe_allow_html=True,
-    )
-
-    st.caption(
-        "The knowledge base did not contain a direct answer to your question. "
-        "The passage above is the most relevant section found in the uploaded documents. "
-        "For a fuller answer, try the AI option below."
-    )
-
-    st.markdown('<div class="ai-link">', unsafe_allow_html=True)
-    if st.button("Get an AI-generated answer instead \u2192", key="ai_btn_chunk"):
-        st.session_state.show_llm = True
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
 else:
-    # ── No answer ─────────────────────────────────────────────────────────────
-    _render_trail(result, show_llm_requested=False)
+    mode          = result.get("mode", "")
+    llm_triggered = st.session_state.llm_answer is not None
 
-    st.warning(
-        "No relevant information was found for your question in the knowledge base or documents."
-    )
-    st.caption(
-        "Both the Q&A knowledge base and the document search were checked but nothing "
-        "closely matched your question. Try rephrasing, or use the AI option below for "
-        "a general answer."
-    )
+    _render_trail(result, llm_triggered=llm_triggered)
 
-    st.markdown('<div class="ai-link">', unsafe_allow_html=True)
-    if st.button("Get an AI-generated answer instead \u2192", key="ai_btn_noanswer"):
-        st.session_state.show_llm = True
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+    # ── Tier 1 & 2: Q&A returned a result ────────────────────────────────────
+    if mode == "qa_answer":
+        best         = result["qa_result"]["best"]
+        score        = best.get("score", 0)
+        alternatives = result["qa_result"].get("alternatives", [])[1:]
+
+        if score >= HIGH_CONF_THRESHOLD:
+            # Tier 1 — high confidence
+            _render_qa_high(best, alternatives)
+            if not llm_triggered:
+                if st.button(
+                    "Not satisfied? Get an AI-generated answer \u2192",
+                    key="ai_btn_qa",
+                ):
+                    with st.spinner("Generating AI answer..."):
+                        try:
+                            st.session_state.llm_answer = retriever.llm_fallback.generate(query)
+                            st.session_state.llm_type = "general"
+                        except Exception as e:
+                            st.session_state.llm_answer = {"ok": False, "reason": str(e)}
+                            st.session_state.llm_type = "general"
+                    st.rerun()
+        else:
+            # Tier 2 — low confidence, show all candidates
+            all_candidates = result["qa_result"].get("alternatives", [])
+            _render_qa_low(all_candidates)
+            if not llm_triggered:
+                if st.button(
+                    "None of these answer your question? Get an AI-generated answer \u2192",
+                    key="ai_btn_low",
+                ):
+                    with st.spinner("Generating AI answer..."):
+                        try:
+                            st.session_state.llm_answer = retriever.llm_fallback.generate(query)
+                            st.session_state.llm_type = "general"
+                        except Exception as e:
+                            st.session_state.llm_answer = {"ok": False, "reason": str(e)}
+                            st.session_state.llm_type = "general"
+                    st.rerun()
+
+    # ── Tier 3: chunk found, no direct Q&A answer ─────────────────────────────
+    elif mode == "chunk_fallback":
+        _render_chunk_found(result)
+        if not llm_triggered:
+            if st.button(
+                "Generate answer from your documents \u2192",
+                key="ai_btn_chunk",
+            ):
+                with st.spinner("Generating answer from your documents..."):
+                    try:
+                        context = _build_chunk_context(result["chunk_result"])
+                        st.session_state.llm_answer = retriever.llm_fallback.generate(
+                            query, context=context
+                        )
+                        st.session_state.llm_type = "grounded"
+                    except Exception as e:
+                        st.session_state.llm_answer = {"ok": False, "reason": str(e)}
+                        st.session_state.llm_type = "grounded"
+                st.rerun()
+
+    # ── Tier 4: nothing found ─────────────────────────────────────────────────
+    else:
+        _render_no_match()
+        if not llm_triggered:
+            if st.button(
+                "Generate a general AI answer \u2192",
+                key="ai_btn_none",
+            ):
+                with st.spinner("Generating AI answer..."):
+                    try:
+                        st.session_state.llm_answer = retriever.llm_fallback.generate(query)
+                        st.session_state.llm_type = "general"
+                    except Exception as e:
+                        st.session_state.llm_answer = {"ok": False, "reason": str(e)}
+                        st.session_state.llm_type = "general"
+                st.rerun()
+
+    # ── LLM answer (rendered below whichever tier triggered it) ───────────────
+    if llm_triggered:
+        _render_llm_answer(st.session_state.llm_answer, st.session_state.llm_type)
