@@ -438,6 +438,15 @@ def _section_qa_index():
             filter_text = st.text_input("Filter by question", key="kb_filter")
             if filter_text:
                 df = df[df["question"].str.contains(filter_text, case=False, na=False)]
+            # Derive source type for clarity
+            if "source_file" in df.columns:
+                df = df.copy()
+                df.insert(
+                    1, "source_type",
+                    df["source_file"].apply(
+                        lambda f: "Manual CSV" if str(f).lower().endswith(".csv") else "PDF"
+                    ),
+                )
             st.dataframe(df, use_container_width=True)
 
 

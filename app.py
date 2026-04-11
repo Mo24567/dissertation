@@ -337,24 +337,18 @@ def _render_trail(result: dict, llm_triggered: bool = False):
 def _render_qa_high(best: dict, alternatives: list):
     score        = best.get("score", 0)
     answer_esc   = _html.escape(str(best.get("answer", "")))
-    source_esc   = _html.escape(str(best.get("source", "")))
-    file_esc     = _html.escape(str(best.get("source_file", "")))
     matched_esc  = _html.escape(str(best.get("matched_question", "")))
-    page         = best.get("page", "")
     bar_pct      = min(int(score * 100), 100)
 
     st.markdown(
         f"""
 <div class="answer-card">
-  <span class="result-mode-badge badge-qa">Answered from knowledge base</span>
+  <span class="result-mode-badge badge-qa">Answered from university sources</span>
   <div class="confidence-bar-wrap">
     <div class="confidence-bar" style="width:{bar_pct}%"></div>
   </div>
   <div class="matched-question">Matched to: \u201c{matched_esc}\u201d</div>
   <p>{answer_esc}</p>
-  <div class="source-citation">
-    Score {score:.2f} \u00b7 {source_esc} \u2014 {file_esc}, Page {page}
-  </div>
 </div>""",
         unsafe_allow_html=True,
     )
@@ -371,14 +365,11 @@ def _render_qa_high(best: dict, alternatives: list):
                 alt_score = alt.get("score", 0)
                 alt_q   = _html.escape(str(alt.get("matched_question", "")))
                 alt_a   = _html.escape(str(alt.get("answer", "")))
-                alt_src = _html.escape(str(alt.get("source_file", "")))
-                alt_pg  = alt.get("page", "")
                 st.markdown(
                     f"""
 <div class="alt-card">
   <div class="alt-question">{alt_q} {_score_pill(alt_score)}</div>
   <div class="alt-answer">{alt_a}</div>
-  <div class="alt-meta">{alt_src}, Page {alt_pg}</div>
 </div>""",
                     unsafe_allow_html=True,
                 )
@@ -391,16 +382,16 @@ def _render_qa_low(candidates: list):
 <div class="no-match-card">
   <span class="result-mode-badge badge-qa-low">Low confidence matches</span>
   <p style="margin:0;opacity:0.7;">
-    We found {n} possible answer{'s' if n != 1 else ''} but none are a strong match
-    for your question. Check whether any of the results below address what you asked
-    — if not, generate an AI answer at the bottom.
+    We found {n} possible answer{'s' if n != 1 else ''} drawn from university sources,
+    but none are a strong match for your question. Check whether any of the results
+    below address what you asked — if not, generate an AI answer at the bottom.
   </p>
 </div>""",
         unsafe_allow_html=True,
     )
 
     st.markdown(
-        '<div class="section-heading">Possible matches — ranked by relevance</div>',
+        '<div class="section-heading">Possible matches — drawn from university sources</div>',
         unsafe_allow_html=True,
     )
 
@@ -408,15 +399,12 @@ def _render_qa_low(candidates: list):
         score   = cand.get("score", 0)
         q_esc   = _html.escape(str(cand.get("matched_question", "")))
         a_esc   = _html.escape(str(cand.get("answer", "")))
-        src_esc = _html.escape(str(cand.get("source_file", "")))
-        page    = cand.get("page", "")
         st.markdown(
             f"""
 <div class="candidate-card">
   <div class="candidate-rank">#{i} match</div>
   <div class="candidate-question">{q_esc} {_score_pill(score)}</div>
   <div class="candidate-answer">{a_esc}</div>
-  <div class="candidate-meta">{src_esc}, Page {page}</div>
 </div>""",
             unsafe_allow_html=True,
         )
