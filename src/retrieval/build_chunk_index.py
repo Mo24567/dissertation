@@ -9,7 +9,7 @@ CHUNKS_PATH = Path("data/processed/document_chunks.csv")
 INDEX_PATH = Path("data/processed/chunk_index.faiss")
 META_PATH = Path("data/processed/chunk_meta.json")
 
-REQUIRED_COLUMNS = ["doc_id", "chunk_id", "text", "source", "source_file", "page", "section"]
+REQUIRED_COLUMNS = ["doc_id", "chunk_id", "text", "source", "source_file", "page"]
 
 
 def build_chunk_index():
@@ -43,7 +43,7 @@ def build_chunk_index():
     faiss.write_index(index, str(INDEX_PATH))
 
     meta = df[
-        ["doc_id", "chunk_id", "text", "source", "source_file", "page", "section"]
+        ["doc_id", "chunk_id", "text", "source", "source_file", "page"]
     ].to_dict(orient="records")
     with open(META_PATH, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

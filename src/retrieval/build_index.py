@@ -9,7 +9,7 @@ QA_DATASET_PATH = Path("data/processed/qa_dataset_clean.csv")
 INDEX_PATH = Path("data/processed/index.faiss")
 META_PATH = Path("data/processed/meta.json")
 
-REQUIRED_COLUMNS = ["id", "question", "answer", "source", "source_file", "page", "section"]
+REQUIRED_COLUMNS = ["id", "question", "answer", "source", "source_file", "page"]
 
 
 def build_index():
@@ -42,7 +42,7 @@ def build_index():
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(INDEX_PATH))
 
-    meta = df[["id", "question", "answer", "source", "source_file", "page", "section"]].to_dict(
+    meta = df[["id", "question", "answer", "source", "source_file", "page"]].to_dict(
         orient="records"
     )
     with open(META_PATH, "w", encoding="utf-8") as f:

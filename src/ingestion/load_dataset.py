@@ -4,8 +4,19 @@ from pathlib import Path
 RAW_DIR = Path("data/raw")
 OUTPUT_PATH = Path("data/processed/qa_dataset_clean.csv")
 
-OUTPUT_COLUMNS = ["id", "question", "answer", "source", "source_file", "page", "section"]
-DEDUP_COLS = ["question", "answer", "source", "page", "section"]
+OUTPUT_COLUMNS = ["id", "question", "answer", "source", "source_file", "page"]
+DEDUP_COLS = ["question"]  # one answer per question — normalised before dedup
+
+
+def _normalise_page(series: pd.Series) -> pd.Series:
+    """Convert page column to clean strings — handles int, float, str, and NaN."""
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"^nan$", "", regex=True)
+        .str.replace(r"\.0$", "", regex=True)
+    )
 
 
 def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
@@ -14,6 +25,10 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     Strips whitespace, removes empty rows, deduplicates, and regenerates IDs.
     Returns DataFrame with columns in canonical order.
     """
+    # Normalise page before any stripping so integer values survive concat
+    if "page" in df.columns:
+        df["page"] = _normalise_page(df["page"])
+
     # Strip whitespace from all object columns
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].str.strip()
@@ -22,9 +37,10 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["question"].notna() & (df["question"] != "")]
     df = df[df["answer"].notna() & (df["answer"] != "")]
 
-    # Deduplicate on key columns (use only those present)
-    dedup_subset = [c for c in DEDUP_COLS if c in df.columns]
-    df = df.drop_duplicates(subset=dedup_subset)
+    # Deduplicate on normalised question — prevents same question with two different answers
+    if "question" in df.columns:
+        norm_q = df["question"].str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
+        df = df[~norm_q.duplicated(keep="first")]
 
     # Drop any existing id column and regenerate
     if "id" in df.columns:
@@ -54,6 +70,10 @@ def load_dataset():
                 print(f"Skipping {csv_path.name}: missing 'question' or 'answer' column")
                 continue
 
+            # Drop section if present — no longer part of the schema
+            if "section" in df.columns:
+                df = df.drop(columns=["section"])
+
             # Auto-add missing metadata columns
             if "source" not in df.columns:
                 df["source"] = csv_path.stem
@@ -61,14 +81,11 @@ def load_dataset():
                 df["source_file"] = csv_path.name
             if "page" not in df.columns:
                 df["page"] = ""
-            if "section" not in df.columns:
-                df["section"] = ""
 
-            # Fill NaN in metadata columns
-            df["source"] = df["source"].fillna(csv_path.stem)
-            df["source_file"] = df["source_file"].fillna(csv_path.name)
-            df["page"] = df["page"].fillna("")
-            df["section"] = df["section"].fillna("")
+            # Normalise metadata columns
+            df["source"] = df["source"].fillna(csv_path.stem).astype(str).str.strip()
+            df["source_file"] = df["source_file"].fillna(csv_path.name).astype(str).str.strip()
+            df["page"] = _normalise_page(df["page"])
 
             dfs.append(df)
             print(f"Loaded {csv_path.name}: {len(df)} rows")
@@ -82,11 +99,11 @@ def load_dataset():
     merged = pd.concat(dfs, ignore_index=True)
 
     # Ensure all metadata columns exist
-    for col in ["source", "source_file", "page", "section"]:
+    for col in ["source", "source_file", "page"]:
         if col not in merged.columns:
             merged[col] = ""
 
-    merged = merged[["question", "answer", "source", "source_file", "page", "section"]]
+    merged = merged[["question", "answer", "source", "source_file", "page"]]
 
     cleaned = clean_dataset(merged)
     cleaned = cleaned[OUTPUT_COLUMNS]

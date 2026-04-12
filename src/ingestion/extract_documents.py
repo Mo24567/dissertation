@@ -6,7 +6,7 @@ from pypdf import PdfReader
 RAW_DOCS_DIR = Path("data/raw_docs")
 OUTPUT_PATH = Path("data/processed/document_chunks.csv")
 CHUNK_SIZE = 800
-OUTPUT_COLUMNS = ["doc_id", "chunk_id", "text", "source", "source_file", "page", "section"]
+OUTPUT_COLUMNS = ["doc_id", "chunk_id", "text", "source", "source_file", "page"]
 
 
 def clean_text(text: str) -> str:
@@ -71,7 +71,6 @@ def extract_documents():
                             "source": pdf_path.stem,
                             "source_file": pdf_path.name,
                             "page": page_num,
-                            "section": "",
                         }
                     )
                     chunk_count += 1

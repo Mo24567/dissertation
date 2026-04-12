@@ -50,7 +50,6 @@ class QARetriever:
                     "source": entry.get("source", ""),
                     "source_file": entry.get("source_file", ""),
                     "page": entry.get("page", ""),
-                    "section": entry.get("section", ""),
                     "id": entry.get("id", ""),
                 }
             )

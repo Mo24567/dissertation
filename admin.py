@@ -1,3 +1,4 @@
+import hashlib
 import io
 from datetime import datetime
 from pathlib import Path
@@ -46,11 +47,15 @@ def get_admin_retriever():
 
 # ── Helper utilities ──────────────────────────────────────────────────────────
 
+def _file_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def _load_csv_safe(path: str) -> pd.DataFrame:
     p = Path(path)
     if p.exists() and p.stat().st_size > 0:
         try:
-            return pd.read_csv(p)
+            return pd.read_csv(p, engine="python", on_bad_lines="skip")
         except Exception:
             pass
     return pd.DataFrame()
@@ -183,16 +188,50 @@ def page_documents():
     with tab_pdf:
         st.subheader("PDF Documents")
 
-        uploaded = st.file_uploader(
-            "Upload a PDF",
+        if st.session_state.get("pdf_upload_error"):
+            st.error(st.session_state.pop("pdf_upload_error"))
+
+        uploaded_pdfs = st.file_uploader(
+            "Upload PDFs",
             type=["pdf"],
+            accept_multiple_files=True,
             label_visibility="collapsed",
             key=f"pdf_uploader_{st.session_state.pdf_upload_counter}",
         )
-        if uploaded:
-            (raw_docs / uploaded.name).write_bytes(uploaded.getvalue())
-            st.session_state.pdf_upload_counter += 1
-            st.rerun()
+        if uploaded_pdfs:
+            errors = [f.name for f in uploaded_pdfs if not f.name.lower().endswith(".pdf")]
+            if errors:
+                st.session_state["pdf_upload_error"] = (
+                    f"Only PDF files are allowed. Not accepted: {', '.join(errors)}"
+                )
+                st.session_state.pdf_upload_counter += 1
+                st.rerun()
+            else:
+                skipped, saved = [], []
+                existing_pdf_hashes = {
+                    _file_hash(p.read_bytes()): p.name
+                    for p in raw_docs.glob("*.pdf")
+                }
+                for f in uploaded_pdfs:
+                    dest = raw_docs / f.name
+                    data = f.getvalue()
+                    if _file_hash(data) in existing_pdf_hashes:
+                        skipped.append(f.name)
+                    else:
+                        # Same filename, different content — purge old chunks so re-extraction is forced
+                        if dest.exists() and chunks_path.exists():
+                            df_ch = _load_csv_safe(str(chunks_path))
+                            if not df_ch.empty and "source_file" in df_ch.columns:
+                                df_ch = df_ch[df_ch["source_file"] != f.name]
+                                df_ch.to_csv(chunks_path, index=False)
+                        dest.write_bytes(data)
+                        saved.append(f.name)
+                if skipped and not saved:
+                    st.session_state["pdf_upload_error"] = (
+                        f"No changes — file(s) already up to date: {', '.join(skipped)}"
+                    )
+                st.session_state.pdf_upload_counter += 1
+                st.rerun()
 
         if pdf_files:
             for p in pdf_files:
@@ -203,6 +242,7 @@ def page_documents():
                 ck = f"confirm_del_pdf_{p.name}"
                 if st.session_state.get(ck):
                     if c4.button("Confirm", key=f"do_del_pdf_{p.name}", type="primary"):
+                        deleted_name = p.name
                         p.unlink()
                         st.session_state.pop(ck, None)
                         remaining = set(f.name for f in raw_docs.glob("*.pdf"))
@@ -212,6 +252,13 @@ def page_documents():
                                 if stale.exists():
                                     stale.unlink()
                             st.cache_resource.clear()
+                        else:
+                            # Remove this PDF's rows from chunks so source_set stays accurate
+                            if chunks_path.exists():
+                                df_chunks = _load_csv_safe(str(chunks_path))
+                                if not df_chunks.empty and "source_file" in df_chunks.columns:
+                                    df_chunks = df_chunks[df_chunks["source_file"] != deleted_name]
+                                    df_chunks.to_csv(chunks_path, index=False)
                         st.rerun()
                 else:
                     if c4.button("Delete", key=f"del_pdf_{p.name}"):
@@ -254,6 +301,15 @@ def page_documents():
                     with st.spinner("Extracting..."):
                         extract_documents.extract_documents()
                     _cleanup_orphaned_qas(set(p.name for p in pdf_files), drafts_path, approved_path)
+                    # Warn about PDFs that produced no text
+                    df_new_chunks = _load_csv_safe(str(chunks_path))
+                    chunked_sources = set(df_new_chunks["source_file"].dropna().unique()) if not df_new_chunks.empty else set()
+                    zero_chunk = [p.name for p in pdf_files if p.name not in chunked_sources]
+                    if zero_chunk:
+                        st.warning(
+                            f"The following PDF(s) produced no text and cannot be searched — "
+                            f"they may be image-only or password-protected: {', '.join(zero_chunk)}"
+                        )
                     st.rerun()
                 except Exception as e:
                     st.error(f"Extraction failed: {e}")
@@ -319,25 +375,90 @@ def page_documents():
         st.subheader("Q&A CSV Upload")
         st.caption("Upload a CSV with `question` and `answer` columns to add pairs directly to the knowledge base.")
 
-        uploaded_qa = st.file_uploader(
-            "Choose a CSV file",
+        if st.session_state.get("csv_upload_error"):
+            st.error(st.session_state.pop("csv_upload_error"))
+        for _info in st.session_state.pop("csv_upload_info", []):
+            st.info(_info)
+
+        uploaded_qas = st.file_uploader(
+            "Choose CSV files",
             type=["csv"],
+            accept_multiple_files=True,
             label_visibility="collapsed",
             key=f"kb_csv_upload_{st.session_state.csv_upload_counter}",
         )
-        if uploaded_qa:
-            try:
-                preview_df = pd.read_csv(io.BytesIO(uploaded_qa.getvalue()))
-                if "question" not in preview_df.columns or "answer" not in preview_df.columns:
-                    st.error("CSV must have `question` and `answer` columns.")
-                else:
-                    st.dataframe(preview_df.head(5), use_container_width=True)
-                    if st.button("Save this CSV", key="kb_save_csv"):
-                        (Path("data/raw") / uploaded_qa.name).write_bytes(uploaded_qa.getvalue())
-                        st.session_state.csv_upload_counter += 1
-                        st.rerun()
-            except Exception as e:
-                st.error(f"Could not read file: {e}")
+        if uploaded_qas:
+            wrong_type = [f.name for f in uploaded_qas if not f.name.lower().endswith(".csv")]
+            if wrong_type:
+                st.session_state["csv_upload_error"] = (
+                    f"The following files are not CSVs: {', '.join(wrong_type)}"
+                )
+                st.session_state.csv_upload_counter += 1
+                st.rerun()
+            else:
+                saved, skipped, errors = [], [], []
+                existing_hashes = {
+                    _file_hash(p.read_bytes()): p.name
+                    for p in Path("data/raw").glob("*.csv")
+                    if p.name != "approved_qas.csv"
+                }
+                for f in uploaded_qas:
+                    raw = f.getvalue()
+                    dest = Path("data/raw") / f.name
+                    upload_hash = _file_hash(raw)
+                    # Identical content already on disk (any filename)
+                    if upload_hash in existing_hashes:
+                        skipped.append(f.name)
+                        continue
+                    preview_df = None
+                    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+                        try:
+                            preview_df = pd.read_csv(io.BytesIO(raw), encoding=enc)
+                            break
+                        except (UnicodeDecodeError, Exception):
+                            continue
+                    if preview_df is None:
+                        errors.append(f"{f.name}: could not read (try saving as CSV UTF-8)")
+                    elif "question" not in preview_df.columns or "answer" not in preview_df.columns:
+                        errors.append(f"{f.name}: missing `question` or `answer` column")
+                    elif len(preview_df) == 0:
+                        errors.append(f"{f.name}: file is empty — no data rows found")
+                    else:
+                        # Check overlap against existing knowledge base
+                        existing_qa = _load_csv_safe("data/processed/qa_dataset_clean.csv")
+                        total_rows = len(preview_df)
+                        new_count = total_rows
+                        if not existing_qa.empty and "question" in existing_qa.columns:
+                            def _norm_q(q):
+                                import re
+                                return re.sub(r"\s+", " ", str(q)).lower().strip()
+                            existing_qs = set(existing_qa["question"].map(_norm_q))
+                            new_count = sum(
+                                1 for _, row in preview_df.iterrows()
+                                if _norm_q(row.get("question", "")) not in existing_qs
+                            )
+                        if new_count == 0:
+                            errors.append(
+                                f"{f.name}: all {total_rows} Q&A pairs already exist in the knowledge base — nothing new to add"
+                            )
+                            continue
+                        dest.write_bytes(raw)
+                        saved.append(f.name)
+                        if new_count < total_rows:
+                            st.session_state.setdefault("csv_upload_info", []).append(
+                                f"{f.name}: {new_count} new row(s) added, {total_rows - new_count} already existed and will be ignored"
+                            )
+
+                msgs = []
+                if skipped:
+                    msgs.append(f"No changes — already up to date: {', '.join(skipped)}")
+                if errors:
+                    msgs.extend(errors)
+                if msgs and not saved:
+                    st.session_state["csv_upload_error"] = "\n".join(msgs)
+                if saved:
+                    st.session_state.csv_upload_counter += 1
+                st.rerun()
 
         raw_csvs_display = sorted(p for p in Path("data/raw").glob("*.csv") if p.name != "approved_qas.csv")
         if raw_csvs_display:
@@ -351,6 +472,16 @@ def page_documents():
                     if c3.button("Confirm", key=f"do_del_csv_{p.name}", type="primary"):
                         p.unlink()
                         st.session_state.pop(ck, None)
+                        # Rebuild dataset and index to remove deleted CSV's Q&As
+                        try:
+                            from src.ingestion import load_dataset
+                            from src.retrieval import build_index
+                            with st.spinner("Removing Q&As and rebuilding index..."):
+                                load_dataset.load_dataset()
+                                build_index.build_index()
+                            st.cache_resource.clear()
+                        except Exception as e:
+                            st.warning(f"CSV deleted but index rebuild failed: {e}")
                         st.rerun()
                 else:
                     if c3.button("Delete", key=f"del_csv_{p.name}"):
@@ -378,18 +509,19 @@ def _section_qa_index():
     qa_index_path = Path("data/processed/index.faiss")
     approved_path = Path("data/raw/approved_qas.csv")
 
-    # Sources summary
+    # Sources summary — read post-dedup counts from qa_dataset_clean.csv
     manual_csvs = [p for p in Path("data/raw").glob("*.csv") if p.name != "approved_qas.csv"]
-    manual_rows = sum(_row_count(str(p)) for p in manual_csvs)
     approved_rows = _row_count(str(approved_path)) if approved_path.exists() else 0
-    total_rows = manual_rows + approved_rows
+    total_rows = _row_count("data/processed/qa_dataset_clean.csv")
+    manual_rows = max(0, total_rows - approved_rows)
 
     src1, src2, src3 = st.columns(3)
     src1.metric("Approved PDF Q&As", approved_rows)
-    src2.metric("Manual CSV rows", manual_rows)
+    src2.metric("CSV Q&As", manual_rows if manual_csvs else 0)
     src3.metric("Index last built", _mtime_label(str(qa_index_path)))
 
-    if total_rows == 0:
+    has_source_data = approved_rows > 0 or bool(manual_csvs)
+    if not has_source_data:
         st.info(
             "No Q&A data yet. Upload PDFs and approve generated pairs, or upload a CSV above."
         )
@@ -438,9 +570,16 @@ def _section_qa_index():
             filter_text = st.text_input("Filter by question", key="kb_filter")
             if filter_text:
                 df = df[df["question"].str.contains(filter_text, case=False, na=False)]
+            df = df.copy()
+            # Clean up page display — pandas reads mixed int/empty as float (1.0, NaN)
+            if "page" in df.columns:
+                df["page"] = (
+                    df["page"].fillna("").astype(str)
+                    .str.replace(r"^nan$", "", regex=True)
+                    .str.replace(r"\.0$", "", regex=True)
+                )
             # Derive source type for clarity
             if "source_file" in df.columns:
-                df = df.copy()
                 df.insert(
                     1, "source_type",
                     df["source_file"].apply(
@@ -535,7 +674,6 @@ def page_draft_review():
                             "source": row.get("source", ""),
                             "source_file": row.get("source_file", ""),
                             "page": row.get("page", ""),
-                            "section": "",
                         })
                     df.to_csv(drafts_path, index=False)
                     if new_rows:
@@ -593,7 +731,6 @@ def page_draft_review():
                                 "source": row.get("source", ""),
                                 "source_file": row.get("source_file", ""),
                                 "page": row.get("page", ""),
-                                "section": "",
                             }])
                             if approved_path.exists():
                                 approved_row.to_csv(approved_path, mode="a", header=False, index=False)
