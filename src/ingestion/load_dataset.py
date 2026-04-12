@@ -1,8 +1,14 @@
+import re
 import pandas as pd
 from pathlib import Path
 
 RAW_DIR = Path("data/raw")
 OUTPUT_PATH = Path("data/processed/qa_dataset_clean.csv")
+EXCLUDED_PATH = Path("data/processed/excluded_qas.csv")
+
+
+def _norm_q(q: str) -> str:
+    return re.sub(r"\s+", " ", str(q)).lower().strip()
 
 OUTPUT_COLUMNS = ["id", "question", "answer", "source", "source_file", "page"]
 DEDUP_COLS = ["question"]  # one answer per question — normalised before dedup
@@ -104,6 +110,18 @@ def load_dataset():
             merged[col] = ""
 
     merged = merged[["question", "answer", "source", "source_file", "page"]]
+
+    # Filter out excluded questions
+    if EXCLUDED_PATH.exists():
+        try:
+            ex_df = pd.read_csv(EXCLUDED_PATH, engine="python", on_bad_lines="skip")
+            if not ex_df.empty and "question_norm" in ex_df.columns:
+                excluded_norms = set(ex_df["question_norm"].dropna())
+                before = len(merged)
+                merged = merged[~merged["question"].map(_norm_q).isin(excluded_norms)]
+                print(f"Excluded {before - len(merged)} Q&A(s) from dataset")
+        except Exception as e:
+            print(f"Warning: could not read exclusion list: {e}")
 
     cleaned = clean_dataset(merged)
     cleaned = cleaned[OUTPUT_COLUMNS]

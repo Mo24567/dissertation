@@ -1,4 +1,5 @@
 import html as _html
+from pathlib import Path
 import streamlit as st
 from src.retrieval.hybrid_query import HybridRetriever
 
@@ -176,15 +177,20 @@ HIGH_CONF_THRESHOLD = 0.75
 
 
 @st.cache_resource(show_spinner=False)
-def get_retriever():
+def get_retriever(index_mtime: float):
     try:
         return HybridRetriever()
     except FileNotFoundError:
         return None
 
 
+def _index_mtime() -> float:
+    p = Path("data/processed/index.faiss")
+    return p.stat().st_mtime if p.exists() else 0.0
+
+
 with st.spinner("Loading knowledge base..."):
-    retriever = get_retriever()
+    retriever = get_retriever(_index_mtime())
 
 if retriever is None:
     st.error(

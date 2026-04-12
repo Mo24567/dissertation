@@ -1,5 +1,6 @@
 import hashlib
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +47,13 @@ def get_admin_retriever():
 
 
 # ── Helper utilities ──────────────────────────────────────────────────────────
+
+EXCLUDED_PATH = Path("data/processed/excluded_qas.csv")
+
+
+def _norm_q(q: str) -> str:
+    return re.sub(r"\s+", " ", str(q)).lower().strip()
+
 
 def _file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -429,9 +437,6 @@ def page_documents():
                         total_rows = len(preview_df)
                         new_count = total_rows
                         if not existing_qa.empty and "question" in existing_qa.columns:
-                            def _norm_q(q):
-                                import re
-                                return re.sub(r"\s+", " ", str(q)).lower().strip()
                             existing_qs = set(existing_qa["question"].map(_norm_q))
                             new_count = sum(
                                 1 for _, row in preview_df.iterrows()
@@ -444,9 +449,25 @@ def page_documents():
                             continue
                         dest.write_bytes(raw)
                         saved.append(f.name)
+                        info_parts = []
                         if new_count < total_rows:
+                            info_parts.append(f"{new_count} new, {total_rows - new_count} already existed and will be ignored")
+                        # Warn about questions blocked by exclusion list
+                        if EXCLUDED_PATH.exists():
+                            ex = _load_csv_safe(str(EXCLUDED_PATH))
+                            if not ex.empty and "question_norm" in ex.columns:
+                                excl_norms = set(ex["question_norm"])
+                                blocked = sum(
+                                    1 for _, row in preview_df.iterrows()
+                                    if _norm_q(str(row.get("question", ""))) in excl_norms
+                                )
+                                if blocked:
+                                    info_parts.append(
+                                        f"{blocked} question(s) are in the Deleted Q&As list and will be excluded — restore them first if you want them included"
+                                    )
+                        if info_parts:
                             st.session_state.setdefault("csv_upload_info", []).append(
-                                f"{f.name}: {new_count} new row(s) added, {total_rows - new_count} already existed and will be ignored"
+                                f"{f.name}: " + "; ".join(info_parts)
                             )
 
                 msgs = []
@@ -509,18 +530,22 @@ def _section_qa_index():
     qa_index_path = Path("data/processed/index.faiss")
     approved_path = Path("data/raw/approved_qas.csv")
 
-    # Sources summary — read post-dedup counts from qa_dataset_clean.csv
+    # Sources summary — derive counts from qa_dataset_clean.csv (post-dedup, post-exclusion)
     manual_csvs = [p for p in Path("data/raw").glob("*.csv") if p.name != "approved_qas.csv"]
-    approved_rows = _row_count(str(approved_path)) if approved_path.exists() else 0
-    total_rows = _row_count("data/processed/qa_dataset_clean.csv")
-    manual_rows = max(0, total_rows - approved_rows)
+    df_clean = _load_csv_safe("data/processed/qa_dataset_clean.csv")
+    if not df_clean.empty and "source_file" in df_clean.columns:
+        approved_rows = int((~df_clean["source_file"].str.lower().str.endswith(".csv", na=False)).sum())
+        manual_rows = int(df_clean["source_file"].str.lower().str.endswith(".csv", na=False).sum())
+    else:
+        approved_rows = 0
+        manual_rows = 0
 
     src1, src2, src3 = st.columns(3)
     src1.metric("Approved PDF Q&As", approved_rows)
-    src2.metric("CSV Q&As", manual_rows if manual_csvs else 0)
+    src2.metric("CSV Q&As", manual_rows)
     src3.metric("Index last built", _mtime_label(str(qa_index_path)))
 
-    has_source_data = approved_rows > 0 or bool(manual_csvs)
+    has_source_data = (approved_rows + manual_rows) > 0 or bool(manual_csvs)
     if not has_source_data:
         st.info(
             "No Q&A data yet. Upload PDFs and approve generated pairs, or upload a CSV above."
@@ -564,6 +589,9 @@ def _section_qa_index():
         except Exception as e:
             st.error(f"Build failed: {e}")
 
+    if "qa_editor_counter" not in st.session_state:
+        st.session_state.qa_editor_counter = 0
+
     df = _load_csv_safe("data/processed/qa_dataset_clean.csv")
     if not df.empty:
         with st.expander("Preview current Q&A dataset"):
@@ -571,14 +599,14 @@ def _section_qa_index():
             if filter_text:
                 df = df[df["question"].str.contains(filter_text, case=False, na=False)]
             df = df.copy()
-            # Clean up page display — pandas reads mixed int/empty as float (1.0, NaN)
+            # Clean up page display
             if "page" in df.columns:
                 df["page"] = (
                     df["page"].fillna("").astype(str)
                     .str.replace(r"^nan$", "", regex=True)
                     .str.replace(r"\.0$", "", regex=True)
                 )
-            # Derive source type for clarity
+            # Derive source type
             if "source_file" in df.columns:
                 df.insert(
                     1, "source_type",
@@ -586,7 +614,53 @@ def _section_qa_index():
                         lambda f: "Manual CSV" if str(f).lower().endswith(".csv") else "PDF"
                     ),
                 )
-            st.dataframe(df, use_container_width=True)
+            # Checklist delete
+            df.insert(0, "Delete", False)
+            edited = st.data_editor(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Delete": st.column_config.CheckboxColumn("Delete", default=False)},
+                disabled=[c for c in df.columns if c != "Delete"],
+                key=f"qa_dataset_editor_{st.session_state.qa_editor_counter}",
+            )
+            to_delete = edited[edited["Delete"] == True]
+            if not to_delete.empty:
+                if st.button(
+                    f"Delete {len(to_delete)} selected Q&A(s)",
+                    type="primary",
+                    key="delete_qas_btn",
+                ):
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    new_excl = pd.DataFrame([
+                        {
+                            "question_norm": _norm_q(row["question"]),
+                            "original_question": row.get("question", ""),
+                            "answer": row.get("answer", ""),
+                            "source_file": row.get("source_file", ""),
+                            "excluded_at": now,
+                        }
+                        for _, row in to_delete.iterrows()
+                    ])
+                    if EXCLUDED_PATH.exists():
+                        ex = _load_csv_safe(str(EXCLUDED_PATH))
+                        existing_norms = set(ex["question_norm"]) if not ex.empty and "question_norm" in ex.columns else set()
+                        new_excl = new_excl[~new_excl["question_norm"].isin(existing_norms)]
+                        if not new_excl.empty:
+                            new_excl.to_csv(EXCLUDED_PATH, mode="a", header=False, index=False)
+                    else:
+                        new_excl.to_csv(EXCLUDED_PATH, index=False)
+                    try:
+                        from src.ingestion import load_dataset
+                        from src.retrieval import build_index
+                        with st.spinner("Removing Q&As and rebuilding index..."):
+                            load_dataset.load_dataset()
+                            build_index.build_index()
+                        st.cache_resource.clear()
+                        st.session_state.qa_editor_counter += 1
+                    except Exception as e:
+                        st.error(f"Deletion failed: {e}")
+                    st.rerun()
 
 
 # ── Page: PDF Q&A Review ──────────────────────────────────────────────────────
@@ -759,7 +833,19 @@ def page_draft_review():
                 "These are saved in `data/raw/approved_qas.csv` and will be included "
                 "the next time you rebuild the Q&A index."
             )
-            st.dataframe(approved, use_container_width=True)
+            # Warn about approved Q&As that are excluded from the dataset
+            if EXCLUDED_PATH.exists():
+                ex = _load_csv_safe(str(EXCLUDED_PATH))
+                if not ex.empty and "question_norm" in ex.columns:
+                    excl_norms = set(ex["question_norm"])
+                    excluded_count = int(approved["question"].map(_norm_q).isin(excl_norms).sum())
+                    if excluded_count > 0:
+                        st.warning(
+                            f"{excluded_count} approved Q&A(s) are currently excluded from the dataset. "
+                            "Go to **Deleted Q&As** to restore them."
+                        )
+            display_cols = [c for c in approved.columns if c != "is_useful"]
+            st.dataframe(approved[display_cols], use_container_width=True)
 
     # ── Rejected tab ──────────────────────────────────────────────────────────
     with tabs[2]:
@@ -767,11 +853,13 @@ def page_draft_review():
         if rejected.empty:
             st.info("No rejected Q&As yet.")
         else:
-            st.dataframe(rejected, use_container_width=True)
+            display_cols = [c for c in rejected.columns if c != "is_useful"]
+            st.dataframe(rejected[display_cols], use_container_width=True)
 
     # ── All tab ───────────────────────────────────────────────────────────────
     with tabs[3]:
-        st.dataframe(df, use_container_width=True)
+        display_cols = [c for c in df.columns if c != "is_useful"]
+        st.dataframe(df[display_cols], use_container_width=True)
 
 
 # ── Page: Settings ────────────────────────────────────────────────────────────
@@ -1152,12 +1240,67 @@ def _display_batch_results(results: list):
     )
 
 
+# ── Page: Deleted Q&As ────────────────────────────────────────────────────────
+
+def page_deleted_qas():
+    st.header("Deleted Q&As")
+    st.caption(
+        "Q&A pairs removed from the knowledge base. "
+        "They remain in their source files but are excluded from the dataset. "
+        "Restore to make them active again."
+    )
+
+    if not EXCLUDED_PATH.exists():
+        st.info("No Q&As have been deleted yet.")
+        return
+
+    df = _load_csv_safe(str(EXCLUDED_PATH))
+    if df.empty:
+        st.info("No Q&As have been deleted yet.")
+        return
+
+    st.write(f"**{len(df)} deleted Q&A(s)**")
+
+    df_display = df.copy()
+    df_display.insert(0, "Restore", False)
+    edited = st.data_editor(
+        df_display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"Restore": st.column_config.CheckboxColumn("Restore", default=False)},
+        disabled=[c for c in df_display.columns if c != "Restore"],
+        key="deleted_qas_editor",
+    )
+
+    to_restore = edited[edited["Restore"] == True]
+    if not to_restore.empty:
+        if st.button(
+            f"Restore {len(to_restore)} selected Q&A(s)",
+            type="primary",
+            key="restore_qas_btn",
+        ):
+            remaining = df[~df["question_norm"].isin(to_restore["question_norm"])]
+            remaining.to_csv(EXCLUDED_PATH, index=False)
+            try:
+                from src.ingestion import load_dataset
+                from src.retrieval import build_index
+                with st.spinner("Restoring Q&As and rebuilding index..."):
+                    load_dataset.load_dataset()
+                    build_index.build_index()
+                st.cache_resource.clear()
+                st.success(f"Restored {len(to_restore)} Q&A(s).")
+            except Exception as e:
+                st.error(f"Restore failed: {e}")
+            st.rerun()
+
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 
 PAGES = {
     "Overview": page_overview,
     "Documents": page_documents,
     "PDF Q\u0026A Review": page_draft_review,
+    "Deleted Q&As": page_deleted_qas,
     "Settings": page_settings,
     "Query Log": page_query_log,
 }
