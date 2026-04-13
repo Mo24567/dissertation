@@ -207,6 +207,7 @@ for _key, _default in [
     ("llm_answer", None),   # result dict from LLMFallback.generate()
     ("llm_type", None),     # "grounded" or "general"
     ("search_error", None),
+    ("no_match_streak", 0),
 ]:
     if _key not in st.session_state:
         st.session_state[_key] = _default
@@ -235,8 +236,10 @@ if submitted:
         st.warning("Please enter a question.")
     elif len(q) < 3:
         st.warning("Please enter a longer question.")
-    elif len(query_input) > 500:
+    elif len(q) > 500:
         st.warning("Please keep your question under 500 characters.")
+    elif not any(c.isalnum() for c in q):
+        st.warning("Please enter a question using words or numbers.")
     else:
         st.session_state.llm_answer = None
         st.session_state.llm_type = None
@@ -244,6 +247,11 @@ if submitted:
         st.session_state.search_error = None
         try:
             st.session_state.last_result = retriever.search(q, llm_enabled=False)
+            mode = st.session_state.last_result.get("mode", "")
+            if mode in ("no_answer", "none"):
+                st.session_state.no_match_streak += 1
+            else:
+                st.session_state.no_match_streak = 0
         except Exception as e:
             st.session_state.last_result = None
             st.session_state.search_error = str(e)
@@ -438,9 +446,18 @@ def _render_chunk_found(result: dict):
     )
 
 
-def _render_no_match():
+def _render_no_match(streak: int = 0):
+    hint = ""
+    if streak >= 2:
+        hint = (
+            '<p style="margin-top:0.75rem;margin-bottom:0;font-size:0.85rem;opacity:0.6;">'
+            "Still not finding what you need? Try rephrasing your question using different "
+            "keywords, or visit <a href='https://www.lboro.ac.uk' target='_blank'>lboro.ac.uk</a> "
+            "for official information."
+            "</p>"
+        )
     st.markdown(
-        """
+        f"""
 <div class="no-match-card">
   <span class="result-mode-badge badge-none">No match found</span>
   <p style="margin:0;opacity:0.65;">
@@ -448,6 +465,7 @@ def _render_no_match():
     relevant information for your question. You can generate a general AI answer
     below, though it won't be drawn from official university sources.
   </p>
+  {hint}
 </div>""",
         unsafe_allow_html=True,
     )
@@ -579,7 +597,7 @@ else:
 
     # ── Tier 4: nothing found ─────────────────────────────────────────────────
     else:
-        _render_no_match()
+        _render_no_match(streak=st.session_state.no_match_streak)
         if not llm_triggered:
             if st.button(
                 "Generate a general AI answer \u2192",

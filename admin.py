@@ -1273,7 +1273,7 @@ def page_evaluation():
     else:
         st.bar_chart(_mode_counts.set_index("method")["count"])
 
-    # ── Section 3: Retrieval Performance ─────────────────────────────────────
+    # ── Section 3: Retrieval Performance ──────────────────────────────────────
     # Purpose: the primary table for the dissertation argument.
     # Shows what % of queries semantic search handled vs passage search vs AI fallback.
     # A high Q&A match rate is the main evidence that semantic search works.
@@ -1311,7 +1311,7 @@ def page_evaluation():
         daily_rate.columns = ["date", "Q&A match rate (%)"]
         st.line_chart(daily_rate.set_index("date"))
 
-    # ── Section 3: Match Quality ──────────────────────────────────────────────
+    # ── Section 4: Match Quality ──────────────────────────────────────────────
     # Purpose: shows the confidence of semantic matches.
     # High scores mean the system isn't just returning approximate answers — it's returning good ones.
     # Score distribution and confidence bands are key dissertation evidence.
@@ -1369,7 +1369,7 @@ def page_evaluation():
     else:
         st.info("No Q&A match data yet.")
 
-    # ── Section 4: Query Characteristics ─────────────────────────────────────
+    # ── Section 5: Query Characteristics ─────────────────────────────────────
     # Purpose: short, natural-language queries are where semantic search has the biggest advantage.
     # If short queries still achieve high match rates, that directly argues against keyword search.
     st.divider()
@@ -1405,7 +1405,7 @@ def page_evaluation():
         st.caption("Questions asked more than once — confirms these are real user needs, not one-off tests.")
         st.dataframe(repeated.head(20), use_container_width=True, hide_index=True)
 
-    # ── Section 5: Gap Analysis ───────────────────────────────────────────────
+    # ── Section 6: Gap Analysis ───────────────────────────────────────────────
     # Purpose: intellectually honest — shows where the system fails.
     # Repeated unanswered queries are the strongest signal of KB gaps.
     # Important for dissertation to acknowledge limitations.
@@ -1444,7 +1444,7 @@ def page_evaluation():
             mime="text/csv",
         )
 
-    # ── Section 6: Score comparison by mode ──────────────────────────────────
+    # ── Section 7: Score Comparison by Mode ──────────────────────────────────
     # Purpose: shows that Q&A matches have higher confidence scores than passage matches.
     # This directly argues that the semantic Q&A layer is functioning correctly —
     # it doesn't just match more queries, it matches them with higher confidence.

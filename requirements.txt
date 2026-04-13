@@ -7,3 +7,5 @@ pypdf
 python-dotenv
 openai
 pytest
+rank_bm25
+plotly
