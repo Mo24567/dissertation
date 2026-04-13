@@ -41,7 +41,7 @@ def check_password() -> bool:
 if not check_password():
     st.stop()
 
-# ── Cached retriever ──────────────────────────────────────────────────────────
+# ── Cached retrievers ─────────────────────────────────────────────────────────
 
 @st.cache_resource
 def get_admin_retriever():
@@ -49,6 +49,24 @@ def get_admin_retriever():
         from src.retrieval.hybrid_query import HybridRetriever
         return HybridRetriever()
     except FileNotFoundError:
+        return None
+
+
+@st.cache_resource
+def get_keyword_retriever():
+    try:
+        from src.retrieval.keyword_retriever import KeywordRetriever
+        return KeywordRetriever()
+    except Exception:
+        return None
+
+
+@st.cache_resource
+def get_qa_retriever():
+    try:
+        from src.retrieval.query import QARetriever
+        return QARetriever()
+    except Exception:
         return None
 
 
@@ -119,6 +137,56 @@ def _cleanup_orphaned_qas(current_pdf_names: set, drafts_path: Path, approved_pa
             cleaned.to_csv(path, index=False)
 
 
+# ── Batch tool helpers ────────────────────────────────────────────────────────
+
+def _questions_match(a: str, b: str) -> bool:
+    """Case-insensitive, whitespace-normalised equality check."""
+    def norm(s):
+        return re.sub(r"\s+", " ", str(s)).lower().strip()
+    return norm(a) == norm(b)
+
+
+def _log_feed_result(query: str, result: dict) -> None:
+    """Write one evaluation-feed query to the dashboard query log."""
+    from src.retrieval.query_logger import log_query, log_unanswered
+    mode = result.get("mode", "no_answer")
+    qa_res = result.get("qa_result", {}) or {}
+    ch_res = result.get("chunk_result", {}) or {}
+    qa_score, chunk_score, source, page = None, None, "", ""
+    if mode == "qa_answer":
+        best = qa_res.get("best", {})
+        qa_score = best.get("score")
+        source = best.get("source", "")
+        page = best.get("page", "")
+    elif mode == "chunk_fallback":
+        qa_score = (qa_res.get("best_candidate") or {}).get("score")
+        best_ch = ch_res.get("best", {})
+        chunk_score = best_ch.get("score")
+        source = best_ch.get("source", "")
+        page = best_ch.get("page", "")
+    else:
+        qa_score = (qa_res.get("best_candidate") or {}).get("score")
+        chunk_score = (ch_res.get("best") or {}).get("score")
+    log_query(
+        query=query,
+        mode=mode,
+        qa_score=qa_score,
+        chunk_score=chunk_score,
+        llm_used=(mode == "llm_fallback"),
+        qa_threshold=settings.similarity_threshold,
+        chunk_threshold=settings.chunk_similarity_threshold,
+        source=source,
+        page=page,
+    )
+    if mode in ("no_answer", "none"):
+        log_unanswered(
+            query=query,
+            best_qa_score=qa_score,
+            best_chunk_score=chunk_score,
+            best_qa_match=qa_res.get("best_candidate"),
+        )
+
+
 # ── Page: Testing ─────────────────────────────────────────────────────────────
 
 def page_testing():
@@ -164,25 +232,206 @@ def page_testing():
                     else:
                         st.write("AI fallback was not used.")
 
-    with st.expander("Batch Test Runner"):
-        st.caption("Upload a CSV with `query` and `expected_answer_id` columns to evaluate accuracy across multiple queries at once.")
+    # ── Evaluation Feed ───────────────────────────────────────────────────────
+    with st.expander("Evaluation Feed"):
+        st.caption(
+            "Upload a CSV with a `query` column. Fires each query through the live system "
+            "and logs the results to the dashboard — use this to populate the Evaluation page "
+            "without typing queries one by one. Uses live threshold settings."
+        )
         retriever = get_admin_retriever()
-        uploaded_test = st.file_uploader("Upload test CSV", type=["csv"], key="eval_batch_upload")
-        if uploaded_test:
+        uploaded_feed = st.file_uploader("Upload queries CSV", type=["csv"], key="feed_upload")
+        if uploaded_feed:
             try:
-                test_df = pd.read_csv(uploaded_test)
+                feed_df = pd.read_csv(uploaded_feed)
             except Exception as e:
-                st.error(f"Failed to read CSV: {e}")
-                test_df = pd.DataFrame()
-            if not test_df.empty:
-                st.dataframe(test_df.head(5), use_container_width=True)
-                if st.button("Run Batch Test", key="eval_batch_run"):
-                    if retriever is None:
-                        st.error("Retriever not available — build the indexes first.")
-                    else:
-                        _run_batch_test(retriever, test_df)
-        if st.session_state.get("eval_batch_results"):
-            _display_batch_results(st.session_state.eval_batch_results)
+                st.error(f"Could not read CSV: {e}")
+                feed_df = pd.DataFrame()
+            if not feed_df.empty:
+                if "query" not in feed_df.columns:
+                    st.error("CSV must have a `query` column.")
+                else:
+                    st.caption(f"{len(feed_df)} queries loaded.")
+                    st.dataframe(feed_df[["query"]].head(5), use_container_width=True)
+                    if st.button("Run Feed", key="feed_run", type="primary"):
+                        if retriever is None:
+                            st.error("Retriever not available — build the indexes first.")
+                        else:
+                            counts = {"qa_answer": 0, "chunk_fallback": 0, "llm_fallback": 0, "no_answer": 0}
+                            prog = st.progress(0)
+                            for i, row in enumerate(feed_df.itertuples(), start=1):
+                                q = str(getattr(row, "query", "")).strip()
+                                if not q:
+                                    continue
+                                res = retriever.search(q)
+                                _log_feed_result(q, res)
+                                mode = res.get("mode", "no_answer")
+                                counts[mode] = counts.get(mode, 0) + 1
+                                prog.progress(i / len(feed_df))
+                            st.success(f"Done — {len(feed_df)} queries logged to the dashboard.")
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Q&A Match", counts.get("qa_answer", 0))
+                            c2.metric("Passage Search", counts.get("chunk_fallback", 0))
+                            c3.metric("AI Fallback", counts.get("llm_fallback", 0))
+                            c4.metric("Unanswered", counts.get("no_answer", 0))
+
+    # ── BM25 vs Semantic Comparison ───────────────────────────────────────────
+    with st.expander("BM25 vs Semantic Comparison"):
+        st.caption(
+            "Upload a CSV with `query` and `expected_question` columns. "
+            "Runs each query through keyword search (BM25) and semantic Q&A search only — "
+            "no passage search or AI fallback. Measures accuracy of each method head-to-head. "
+            "`expected_question` should be the exact question text from your knowledge base."
+        )
+        kw_retriever = get_keyword_retriever()
+        qa_retriever = get_qa_retriever()
+        uploaded_cmp = st.file_uploader("Upload comparison CSV", type=["csv"], key="cmp_upload")
+        if uploaded_cmp:
+            try:
+                cmp_df = pd.read_csv(uploaded_cmp)
+            except Exception as e:
+                st.error(f"Could not read CSV: {e}")
+                cmp_df = pd.DataFrame()
+            if not cmp_df.empty:
+                missing = [c for c in ["query", "expected_question"] if c not in cmp_df.columns]
+                if missing:
+                    st.error(f"CSV is missing column(s): {', '.join(missing)}")
+                else:
+                    st.caption(f"{len(cmp_df)} queries loaded.")
+                    st.dataframe(cmp_df.head(5), use_container_width=True)
+                    if st.button("Run Comparison", key="cmp_run", type="primary"):
+                        if kw_retriever is None or qa_retriever is None:
+                            st.error("Retrievers not available — build the indexes first.")
+                        else:
+                            rows = []
+                            prog = st.progress(0)
+                            for i, row in enumerate(cmp_df.itertuples(), start=1):
+                                q = str(getattr(row, "query", "")).strip()
+                                expected = str(getattr(row, "expected_question", "")).strip()
+                                bm25_res = kw_retriever.search(q)
+                                bm25_match = bm25_res.get("matched_question", "")
+                                bm25_correct = "✓" if _questions_match(bm25_match, expected) else "✗"
+                                sem_res = qa_retriever.answer(q, threshold=settings.similarity_threshold)
+                                sem_match = ""
+                                sem_score = None
+                                if sem_res.get("ok"):
+                                    sem_match = sem_res["best"].get("matched_question", "")
+                                    sem_score = sem_res["best"].get("score")
+                                elif sem_res.get("best_candidate"):
+                                    sem_match = sem_res["best_candidate"].get("matched_question", "")
+                                    sem_score = sem_res["best_candidate"].get("score")
+                                sem_correct = "✓" if sem_res.get("ok") and _questions_match(sem_match, expected) else "✗"
+                                rows.append({
+                                    "query": q[:70],
+                                    "expected": expected[:70],
+                                    "BM25 matched": bm25_match[:70],
+                                    "BM25": bm25_correct,
+                                    "BM25 score": f"{bm25_res.get('score', 0):.3f}",
+                                    "Semantic matched": sem_match[:70],
+                                    "Semantic": sem_correct,
+                                    "Semantic score": f"{sem_score:.3f}" if sem_score is not None else "—",
+                                })
+                                prog.progress(i / len(cmp_df))
+                            st.session_state.cmp_results = rows
+
+        if st.session_state.get("cmp_results"):
+            rows = st.session_state.cmp_results
+            results_df = pd.DataFrame(rows)
+            st.dataframe(results_df, use_container_width=True)
+            total = len(rows)
+            bm25_acc = sum(1 for r in rows if r["BM25"] == "✓") / total * 100
+            sem_acc = sum(1 for r in rows if r["Semantic"] == "✓") / total * 100
+            m1, m2 = st.columns(2)
+            m1.metric("BM25 Accuracy", f"{bm25_acc:.1f}%")
+            m2.metric("Semantic Accuracy", f"{sem_acc:.1f}%")
+            st.download_button(
+                "Export comparison CSV",
+                data=results_df.to_csv(index=False).encode("utf-8"),
+                file_name="bm25_vs_semantic.csv",
+                mime="text/csv",
+            )
+
+    # ── Full System Capture ───────────────────────────────────────────────────
+    with st.expander("Full System Capture"):
+        st.caption(
+            "Upload a CSV with a `query` column. Runs each query through the complete pipeline "
+            "and captures what each layer returned. Export the result and fill in the "
+            "`Correct?` column yourself — this becomes your manual correctness sheet."
+        )
+        retriever = get_admin_retriever()
+        include_llm = st.checkbox(
+            "Include AI fallback (uses OpenAI API)",
+            value=False,
+            key="capture_llm",
+            help="If unchecked, queries that reach the AI fallback layer will show as Unanswered instead.",
+        )
+        uploaded_cap = st.file_uploader("Upload queries CSV", type=["csv"], key="cap_upload")
+        if uploaded_cap:
+            try:
+                cap_df = pd.read_csv(uploaded_cap)
+            except Exception as e:
+                st.error(f"Could not read CSV: {e}")
+                cap_df = pd.DataFrame()
+            if not cap_df.empty:
+                if "query" not in cap_df.columns:
+                    st.error("CSV must have a `query` column.")
+                else:
+                    st.caption(f"{len(cap_df)} queries loaded.")
+                    st.dataframe(cap_df[["query"]].head(5), use_container_width=True)
+                    if st.button("Run Capture", key="cap_run", type="primary"):
+                        if retriever is None:
+                            st.error("Retriever not available — build the indexes first.")
+                        else:
+                            _mode_labels = {
+                                "qa_answer": "Q&A Match",
+                                "chunk_fallback": "Passage Search",
+                                "llm_fallback": "AI Fallback",
+                                "no_answer": "Unanswered",
+                            }
+                            rows = []
+                            prog = st.progress(0)
+                            for i, row in enumerate(cap_df.itertuples(), start=1):
+                                q = str(getattr(row, "query", "")).strip()
+                                if not q:
+                                    continue
+                                res = retriever.search(q, llm_enabled=include_llm)
+                                mode = res.get("mode", "no_answer")
+                                qa_answer, passage_text, ai_answer = "", "", ""
+                                if mode == "qa_answer":
+                                    best = res.get("qa_result", {}).get("best", {})
+                                    qa_answer = best.get("answer", "")
+                                elif mode == "chunk_fallback":
+                                    best = res.get("chunk_result", {}).get("best", {})
+                                    passage_text = best.get("text", "")
+                                elif mode == "llm_fallback":
+                                    ai_answer = (res.get("llm_result") or {}).get("answer", "")
+                                rows.append({
+                                    "query": q,
+                                    "layer": _mode_labels.get(mode, mode),
+                                    "Q&A answer": qa_answer,
+                                    "Passage returned": passage_text,
+                                    "AI answer": ai_answer,
+                                    "Correct?": "",
+                                })
+                                prog.progress(i / len(cap_df))
+                            st.session_state.cap_results = rows
+
+        if st.session_state.get("cap_results"):
+            rows = st.session_state.cap_results
+            cap_results_df = pd.DataFrame(rows)
+            st.dataframe(cap_results_df, use_container_width=True)
+            total = len(rows)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Q&A Match", sum(1 for r in rows if r["layer"] == "Q&A Match"))
+            c2.metric("Passage Search", sum(1 for r in rows if r["layer"] == "Passage Search"))
+            c3.metric("AI Fallback", sum(1 for r in rows if r["layer"] == "AI Fallback"))
+            c4.metric("Unanswered", sum(1 for r in rows if r["layer"] == "Unanswered"))
+            st.download_button(
+                "Export for manual annotation",
+                data=cap_results_df.to_csv(index=False).encode("utf-8"),
+                file_name="full_system_capture.csv",
+                mime="text/csv",
+            )
 
     # ── Query Log ─────────────────────────────────────────────────────────────
     log = _load_csv_safe("data/processed/query_log.csv")
@@ -1206,7 +1455,7 @@ def page_evaluation():
     score_rows = []
     for mode_val, label in [
         ("qa_answer", "Semantic Q&A match"),
-        ("chunk_fallback", "Passage search"),
+        ("chunk_fallback", "Passage Search"),
         ("llm_fallback", "AI fallback"),
         ("no_answer", "Unanswered"),
     ]:
@@ -1362,83 +1611,6 @@ def page_settings():
             if st.button("Reset selected", type="primary", key="reset_confirm_btn"):
                 st.session_state["confirm_reset"] = True
                 st.rerun()
-
-
-# ── Batch test helpers ────────────────────────────────────────────────────────
-
-def _run_batch_test(retriever, test_df: pd.DataFrame, qa_top_k=None, chunk_top_k=None, key_suffix=""):
-    results = []
-    progress = st.progress(0)
-    total = len(test_df)
-
-    for i, row in enumerate(test_df.itertuples(), start=1):
-        query = str(getattr(row, "query", ""))
-        expected = str(getattr(row, "expected_answer_id", ""))
-
-        kwargs = {}
-        if qa_top_k is not None:
-            kwargs["qa_top_k"] = qa_top_k
-        if chunk_top_k is not None:
-            kwargs["chunk_top_k"] = chunk_top_k
-
-        result = retriever.search(query, **kwargs)
-        mode = result.get("mode", "")
-
-        if mode == "qa_answer":
-            got_id = result["qa_result"]["best"].get("id", "")
-            qa_score = result["qa_result"]["best"].get("score")
-            correct = "\u2713" if got_id == expected else "\u2717"
-        else:
-            got_id = ""
-            qa_score = None
-            if result.get("qa_result", {}).get("best_candidate"):
-                qa_score = result["qa_result"]["best_candidate"].get("score")
-            correct = "\u2014"
-
-        results.append({
-            "query": query[:60],
-            "expected": expected,
-            "got_id": got_id,
-            "mode": mode,
-            "score": qa_score,
-            "correct": correct,
-            "qa_score": qa_score,
-        })
-        progress.progress(i / total)
-
-    st.session_state.eval_batch_results = results
-    st.session_state.eval_batch_df = test_df
-
-
-def _display_batch_results(results: list):
-    results_df = pd.DataFrame(results)[["query", "expected", "got_id", "mode", "score", "correct"]]
-    st.dataframe(results_df, use_container_width=True)
-
-    total = len(results)
-    qa_attempts = [r for r in results if r.get("mode") == "qa_answer"]
-    correct_results = [r for r in qa_attempts if r.get("correct") == "\u2713"]
-    incorrect_results = [r for r in qa_attempts if r.get("correct") == "\u2717"]
-
-    top1_acc = len(correct_results) / max(len(qa_attempts), 1) * 100
-    qa_rate = len(qa_attempts) / total * 100
-    chunk_rate = sum(1 for r in results if r.get("mode") == "chunk_fallback") / total * 100
-
-    llm_rate = sum(1 for r in results if r.get("mode") == "llm_fallback") / total * 100
-    none_rate = sum(1 for r in results if r.get("mode") in ["no_answer", "none"]) / total * 100
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Top-1 Accuracy", f"{top1_acc:.1f}%")
-    m2.metric("Q&A Match", f"{qa_rate:.1f}%")
-    m3.metric("Passage Search", f"{chunk_rate:.1f}%")
-    m4.metric("AI Fallback", f"{llm_rate:.1f}%")
-    m5.metric("Unanswered", f"{none_rate:.1f}%")
-
-    st.download_button(
-        "Download Results CSV",
-        data=results_df.to_csv(index=False).encode("utf-8"),
-        file_name="eval_results.csv",
-        mime="text/csv",
-    )
 
 
 # ── Page: Deleted Q&As ────────────────────────────────────────────────────────
