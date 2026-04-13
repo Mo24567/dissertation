@@ -4,6 +4,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import plotly.express as px
+    _PLOTLY = True
+except ImportError:
+    _PLOTLY = False
+
 import pandas as pd
 import streamlit as st
 from dotenv import find_dotenv, set_key
@@ -59,6 +65,19 @@ def _file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _queue_message(key: str, message: str, level: str = "success") -> None:
+    """Store a confirmation message for a specific UI location."""
+    st.session_state[f"_msg_{key}"] = (message, level)
+
+
+def _show_message(key: str) -> None:
+    """Display and clear a queued message for this location."""
+    entry = st.session_state.pop(f"_msg_{key}", None)
+    if entry:
+        message, level = entry
+        getattr(st, level)(message)
+
+
 def _load_csv_safe(path: str) -> pd.DataFrame:
     p = Path(path)
     if p.exists() and p.stat().st_size > 0:
@@ -100,36 +119,359 @@ def _cleanup_orphaned_qas(current_pdf_names: set, drafts_path: Path, approved_pa
             cleaned.to_csv(path, index=False)
 
 
-# ── Page: Overview ────────────────────────────────────────────────────────────
+# ── Page: Testing ─────────────────────────────────────────────────────────────
 
-def page_overview():
-    st.header("Overview")
+def page_testing():
+    st.header("Testing")
+
+    # ── Testing tools ─────────────────────────────────────────────────────────
+    with st.expander("Test a Single Query"):
+        st.caption("Run a query against the live assistant to see which layer handled it and what scores were returned. Useful for checking threshold settings.")
+        retriever = get_admin_retriever()
+        eval_query = st.text_input("Query", key="eval_single_query")
+        if st.button("Run", key="eval_single_run") and eval_query.strip():
+            if retriever is None:
+                st.error("Retriever not available — build the indexes first.")
+            else:
+                result = retriever.search(
+                    eval_query.strip(),
+                    qa_threshold=settings.similarity_threshold,
+                    chunk_threshold=settings.chunk_similarity_threshold,
+                )
+                st.write(f"**Handled by:** `{result.get('mode')}`")
+                with st.expander("Q&A match details", expanded=True):
+                    qa = result.get("qa_result", {})
+                    st.write(f"**Matched:** {qa.get('ok')}  |  **Reason:** {qa.get('reason', 'n/a')}")
+                    if qa.get("alternatives"):
+                        rows = [{"score": r["score"], "matched_question": r["matched_question"][:80], "answer": r["answer"][:80]} for r in qa["alternatives"]]
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    elif qa.get("best_candidate"):
+                        bc = qa["best_candidate"]
+                        st.write(f"Closest match score: {bc['score']:.4f} — {bc.get('matched_question', '')[:80]}")
+                with st.expander("Passage search details"):
+                    cr = result.get("chunk_result", {})
+                    st.write(f"**Matched:** {cr.get('ok')}  |  **Reason:** {cr.get('reason', 'n/a')}")
+                    if cr.get("results"):
+                        rows = [{"score": r["score"], "text": r["text"][:100]} for r in cr["results"]]
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    elif cr.get("best"):
+                        st.write(f"Closest passage score: {cr['best']['score']:.4f}")
+                with st.expander("AI fallback details"):
+                    llm = result.get("llm_result")
+                    if llm:
+                        st.write(f"**Used:** {llm.get('ok')}  |  **Model:** {llm.get('model')}  |  **Time:** {llm.get('latency_ms')} ms")
+                        st.write(llm.get("answer", ""))
+                    else:
+                        st.write("AI fallback was not used.")
+
+    with st.expander("Batch Test Runner"):
+        st.caption("Upload a CSV with `query` and `expected_answer_id` columns to evaluate accuracy across multiple queries at once.")
+        retriever = get_admin_retriever()
+        uploaded_test = st.file_uploader("Upload test CSV", type=["csv"], key="eval_batch_upload")
+        if uploaded_test:
+            try:
+                test_df = pd.read_csv(uploaded_test)
+            except Exception as e:
+                st.error(f"Failed to read CSV: {e}")
+                test_df = pd.DataFrame()
+            if not test_df.empty:
+                st.dataframe(test_df.head(5), use_container_width=True)
+                if st.button("Run Batch Test", key="eval_batch_run"):
+                    if retriever is None:
+                        st.error("Retriever not available — build the indexes first.")
+                    else:
+                        _run_batch_test(retriever, test_df)
+        if st.session_state.get("eval_batch_results"):
+            _display_batch_results(st.session_state.eval_batch_results)
+
+    # ── Query Log ─────────────────────────────────────────────────────────────
     log = _load_csv_safe("data/processed/query_log.csv")
 
-    if log.empty:
+    st.divider()
+    st.subheader("Query Log")
+
+    if not log.empty:
+        if "timestamp" in log.columns:
+            log["timestamp"] = pd.to_datetime(log["timestamp"], errors="coerce")
+        if "qa_score" in log.columns:
+            log["qa_score"] = pd.to_numeric(log["qa_score"], errors="coerce")
+        if "chunk_score" in log.columns:
+            log["chunk_score"] = pd.to_numeric(log["chunk_score"], errors="coerce")
+
+        tab_all, tab_unanswered = st.tabs(["All Queries", "Unanswered"])
+
+        with tab_all:
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                modes = ["All"] + sorted(log["mode"].dropna().unique().tolist())
+                mode_filter = st.selectbox("Mode", modes, key="log_mode_filter")
+            with fc2:
+                if log["timestamp"].notna().any():
+                    min_date = log["timestamp"].min()
+                    max_date = log["timestamp"].max()
+                    if pd.notna(min_date) and pd.notna(max_date):
+                        date_range = st.date_input(
+                            "Date range",
+                            value=(min_date.date(), max_date.date()),
+                            key="log_date_range",
+                        )
+                    else:
+                        date_range = None
+                else:
+                    date_range = None
+            with fc3:
+                min_score = st.number_input(
+                    "Min QA Score", min_value=0.0, max_value=1.0,
+                    value=0.0, step=0.01, key="log_min_score",
+                )
+
+            filtered = log.copy()
+            if mode_filter != "All":
+                filtered = filtered[filtered["mode"] == mode_filter]
+            if date_range and len(date_range) == 2 and "timestamp" in filtered.columns:
+                start_dt = pd.Timestamp(date_range[0])
+                end_dt = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
+                filtered = filtered[
+                    (filtered["timestamp"] >= start_dt) & (filtered["timestamp"] < end_dt)
+                ]
+            if "qa_score" in filtered.columns and min_score > 0:
+                filtered = filtered[filtered["qa_score"].fillna(0) >= min_score]
+
+            sm1, sm2, sm3 = st.columns(3)
+            sm1.metric("Shown", len(filtered))
+            avg_qa_f = filtered["qa_score"].dropna().mean() if "qa_score" in filtered.columns else None
+            avg_chunk_f = filtered["chunk_score"].dropna().mean() if "chunk_score" in filtered.columns else None
+            sm2.metric("Avg QA Score", f"{avg_qa_f:.4f}" if avg_qa_f is not None and not pd.isna(avg_qa_f) else "n/a")
+            sm3.metric("Avg Chunk Score", f"{avg_chunk_f:.4f}" if avg_chunk_f is not None and not pd.isna(avg_chunk_f) else "n/a")
+
+            st.dataframe(filtered, use_container_width=True)
+            st.download_button(
+                "Export filtered log",
+                data=filtered.to_csv(index=False).encode("utf-8"),
+                file_name="query_log_filtered.csv",
+                mime="text/csv",
+            )
+
+        with tab_unanswered:
+            unanswered = _load_csv_safe("data/processed/unanswered_log.csv")
+            if unanswered.empty:
+                st.info("No unanswered queries yet.")
+            else:
+                st.caption("These queries failed all retrieval layers. Use them to identify gaps in the knowledge base.")
+                st.dataframe(unanswered, use_container_width=True)
+                st.download_button(
+                    "Export unanswered log",
+                    data=unanswered.to_csv(index=False).encode("utf-8"),
+                    file_name="unanswered_log.csv",
+                    mime="text/csv",
+                )
+    else:
         st.info("No query data yet. The log will populate once users start asking questions.")
+
+
+# ── Inline Q&A review (used inside PDFs tab) ─────────────────────────────────
+
+def _review_drafts_inline():
+    drafts_path = Path("data/processed/draft_qas.csv")
+    approved_path = Path("data/raw/approved_qas.csv")
+
+    if not drafts_path.exists():
+        st.info("No suggestions yet — generate them above.")
         return
 
-    total = len(log)
-    qa_rate = (log["mode"] == "qa_answer").sum() / total * 100 if total else 0
-    chunk_rate = (log["mode"] == "chunk_fallback").sum() / total * 100 if total else 0
-    llm_rate = (log["mode"] == "llm_fallback").sum() / total * 100 if total else 0
+    df = _load_csv_safe(str(drafts_path))
+    if df.empty:
+        st.info("No suggestions found.")
+        return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Queries", total)
-    c2.metric("Q&A Match Rate", f"{qa_rate:.1f}%")
-    c3.metric("Chunk Fallback Rate", f"{chunk_rate:.1f}%")
-    c4.metric("LLM Fallback Rate", f"{llm_rate:.1f}%")
+    if "review_status" not in df.columns:
+        df["review_status"] = "pending"
 
-    st.subheader("Mode Distribution")
-    st.bar_chart(log["mode"].value_counts())
+    reviewable = df[df["review_status"] != "skipped"]
+    total = len(reviewable)
+    reviewed = int((reviewable["review_status"].isin(["approved", "rejected"])).sum())
+    pending_count = int((reviewable["review_status"] == "pending").sum())
 
-    st.subheader("Recent Queries")
-    recent = log.tail(20).copy()
-    if "query" in recent.columns:
-        recent["query"] = recent["query"].str[:60]
-    display_cols = [c for c in ["timestamp", "query", "mode", "qa_score"] if c in recent.columns]
-    st.dataframe(recent[display_cols], use_container_width=True)
+    st.write(f"**{reviewed} of {total} reviewed — {pending_count} pending**")
+    st.progress(reviewed / total if total else 0)
+
+    tabs = st.tabs(["Pending", "Approved", "Rejected", "All"])
+
+    # ── Pending ───────────────────────────────────────────────────────────────
+    with tabs[0]:
+        _show_message("review_action")
+        pending_df = df[
+            (df["review_status"] == "pending")
+            & (~df.index.isin(st.session_state.draft_skipped))
+        ].copy()
+
+        if pending_df.empty:
+            st.success("All suggestions have been reviewed.")
+        else:
+            st.caption(
+                f"{len(pending_df)} suggestion(s) awaiting review. "
+                "Select items using checkboxes and approve or reject in bulk, or use the buttons on each card."
+            )
+
+            select_all = st.checkbox("Select all", key="select_all_pending")
+            if select_all:
+                selected = list(pending_df.index)
+            else:
+                selected = [idx for idx in pending_df.index if st.session_state.get(f"chk_{idx}", False)]
+
+            ba1, ba2 = st.columns(2)
+            with ba1:
+                if st.button(
+                    f"Approve selected ({len(selected)})",
+                    disabled=len(selected) == 0,
+                    type="primary",
+                    use_container_width=True,
+                    key="bulk_approve",
+                ):
+                    new_rows = []
+                    for idx in selected:
+                        row = df.loc[idx]
+                        df.loc[idx, "review_status"] = "approved"
+                        new_rows.append({
+                            "question": row.get("question", ""),
+                            "answer": row.get("answer", ""),
+                            "source": row.get("source", ""),
+                            "source_file": row.get("source_file", ""),
+                            "page": row.get("page", ""),
+                        })
+                    df.to_csv(drafts_path, index=False)
+                    if new_rows:
+                        new_df = pd.DataFrame(new_rows)
+                        if approved_path.exists():
+                            new_df.to_csv(approved_path, mode="a", header=False, index=False)
+                        else:
+                            new_df.to_csv(approved_path, index=False)
+                    for idx in selected:
+                        st.session_state.pop(f"chk_{idx}", None)
+                    st.session_state.pop("select_all_pending", None)
+                    _queue_message("review_action", f"{len(selected)} Q&A(s) approved.")
+                    st.rerun()
+
+            with ba2:
+                if st.button(
+                    f"Reject selected ({len(selected)})",
+                    disabled=len(selected) == 0,
+                    use_container_width=True,
+                    key="bulk_reject",
+                ):
+                    for idx in selected:
+                        df.loc[idx, "review_status"] = "rejected"
+                    df.to_csv(drafts_path, index=False)
+                    for idx in selected:
+                        st.session_state.pop(f"chk_{idx}", None)
+                    st.session_state.pop("select_all_pending", None)
+                    _queue_message("review_action", f"{len(selected)} Q&A(s) rejected.", level="warning")
+                    st.rerun()
+
+            st.divider()
+
+            for row_idx, row in pending_df.iterrows():
+                col_chk, col_content = st.columns([0.05, 0.95])
+                with col_chk:
+                    st.checkbox(
+                        "",
+                        key=f"chk_{row_idx}",
+                        value=select_all or st.session_state.get(f"chk_{row_idx}", False),
+                    )
+                with col_content:
+                    st.markdown(f"**Q: {row.get('question', '')}**")
+                    st.write(f"A: {row.get('answer', '')}")
+                    st.caption(
+                        f"Source: {row.get('source_file', '') or 'n/a'} | "
+                        f"Page: {row.get('page', '') or 'n/a'}"
+                    )
+                    ib1, ib2, ib3 = st.columns(3)
+                    with ib1:
+                        if st.button("Approve", key=f"approve_{row_idx}", type="primary"):
+                            df.loc[row_idx, "review_status"] = "approved"
+                            df.to_csv(drafts_path, index=False)
+                            approved_row = pd.DataFrame([{
+                                "question": row.get("question", ""),
+                                "answer": row.get("answer", ""),
+                                "source": row.get("source", ""),
+                                "source_file": row.get("source_file", ""),
+                                "page": row.get("page", ""),
+                            }])
+                            if approved_path.exists():
+                                approved_row.to_csv(approved_path, mode="a", header=False, index=False)
+                            else:
+                                approved_row.to_csv(approved_path, index=False)
+                            _queue_message("review_action", "Q&A approved.")
+                            st.rerun()
+                    with ib2:
+                        if st.button("Reject", key=f"reject_{row_idx}"):
+                            df.loc[row_idx, "review_status"] = "rejected"
+                            df.to_csv(drafts_path, index=False)
+                            _queue_message("review_action", "Q&A rejected.", level="warning")
+                            st.rerun()
+                    with ib3:
+                        if st.button("Skip", key=f"skip_{row_idx}"):
+                            st.session_state.draft_skipped.add(row_idx)
+                            _queue_message("review_action", "Q&A skipped.", level="info")
+                            st.rerun()
+                st.divider()
+
+    # ── Approved ──────────────────────────────────────────────────────────────
+    with tabs[1]:
+        approved = df[df["review_status"] == "approved"]
+        if approved.empty:
+            st.info("No approved Q&As yet.")
+        else:
+            st.caption(f"{len(approved)} pair(s) approved.")
+            if EXCLUDED_PATH.exists():
+                ex = _load_csv_safe(str(EXCLUDED_PATH))
+                if not ex.empty and "question_norm" in ex.columns:
+                    excl_norms = set(ex["question_norm"])
+                    excluded_count = int(approved["question"].map(_norm_q).isin(excl_norms).sum())
+                    if excluded_count > 0:
+                        st.warning(
+                            f"{excluded_count} approved Q&A(s) are currently excluded. "
+                            "Go to **Knowledge Base → Deleted Q&As** to restore them."
+                        )
+            display_cols = [c for c in approved.columns if c != "is_useful"]
+            st.dataframe(approved[display_cols], use_container_width=True)
+
+    # ── Rejected ──────────────────────────────────────────────────────────────
+    with tabs[2]:
+        rejected = df[df["review_status"] == "rejected"]
+        if rejected.empty:
+            st.info("No rejected Q&As yet.")
+        else:
+            st.caption(f"{len(rejected)} rejected — click Approve to move a pair back to approved.")
+            for row_idx, row in rejected.iterrows():
+                c1, c2 = st.columns([0.9, 0.1])
+                with c1:
+                    st.markdown(f"**Q: {row.get('question', '')}**")
+                    st.write(f"A: {row.get('answer', '')}")
+                    st.caption(f"Source: {row.get('source_file', '') or 'n/a'} | Page: {row.get('page', '') or 'n/a'}")
+                with c2:
+                    if st.button("Approve", key=f"re_approve_{row_idx}", type="primary"):
+                        df.loc[row_idx, "review_status"] = "approved"
+                        df.to_csv(drafts_path, index=False)
+                        approved_row = pd.DataFrame([{
+                            "question": row.get("question", ""),
+                            "answer": row.get("answer", ""),
+                            "source": row.get("source", ""),
+                            "source_file": row.get("source_file", ""),
+                            "page": row.get("page", ""),
+                        }])
+                        if approved_path.exists():
+                            approved_row.to_csv(approved_path, mode="a", header=False, index=False)
+                        else:
+                            approved_row.to_csv(approved_path, index=False)
+                        _queue_message("review_action", "Q&A moved back to approved.")
+                        st.rerun()
+                st.divider()
+
+    # ── All ───────────────────────────────────────────────────────────────────
+    with tabs[3]:
+        display_cols = [c for c in df.columns if c != "is_useful"]
+        st.dataframe(df[display_cols], use_container_width=True)
 
 
 # ── Page: Documents ───────────────────────────────────────────────────────────
@@ -141,6 +483,8 @@ def page_documents():
         st.session_state.pdf_upload_counter = 0
     if "csv_upload_counter" not in st.session_state:
         st.session_state.csv_upload_counter = 0
+    if "qa_editor_counter" not in st.session_state:
+        st.session_state.qa_editor_counter = 0
 
     raw_docs = Path("data/raw_docs")
     chunks_path = Path("data/processed/document_chunks.csv")
@@ -190,14 +534,15 @@ def page_documents():
         if not df_pd.empty and "review_status" in df_pd.columns:
             pending_drafts = int((df_pd["review_status"] == "pending").sum())
 
-    tab_pdf, tab_csv = st.tabs(["PDF Pipeline", "Q&A CSV"])
+    tab_pdf, tab_csv = st.tabs(["PDFs", "Q&A Files"])
 
-    # ── Tab 1: PDF Pipeline ───────────────────────────────────────────────────
+    # ── Tab 1: PDFs ───────────────────────────────────────────────────────────
     with tab_pdf:
         st.subheader("PDF Documents")
 
         if st.session_state.get("pdf_upload_error"):
             st.error(st.session_state.pop("pdf_upload_error"))
+        _show_message("pdf_action")
 
         uploaded_pdfs = st.file_uploader(
             "Upload PDFs",
@@ -238,6 +583,32 @@ def page_documents():
                     st.session_state["pdf_upload_error"] = (
                         f"No changes — file(s) already up to date: {', '.join(skipped)}"
                     )
+                if saved:
+                    try:
+                        from src.ingestion import extract_documents
+                        from src.retrieval import build_chunk_index
+                        current_pdfs = set(p.name for p in raw_docs.glob("*.pdf"))
+                        with st.spinner("Processing uploaded PDFs — please wait..."):
+                            extract_documents.extract_documents()
+                            build_chunk_index.build_chunk_index()
+                        _cleanup_orphaned_qas(current_pdfs, drafts_path, approved_path)
+                        st.cache_resource.clear()
+                        df_new_chunks = _load_csv_safe(str(chunks_path))
+                        chunked_sources = set(df_new_chunks["source_file"].dropna().unique()) if not df_new_chunks.empty else set()
+                        zero_chunk = [n for n in saved if n not in chunked_sources]
+                        if zero_chunk:
+                            st.session_state["pdf_upload_error"] = (
+                                f"The following PDF(s) could not be read and won't be searchable — "
+                                f"they may be image-only or password-protected: {', '.join(zero_chunk)}"
+                            )
+                        st.session_state["generate_confirmed"] = False
+                        _queue_message("pdf_action", f"Uploaded and ready: {', '.join(saved)}")
+                    except Exception as e:
+                        _queue_message(
+                            "pdf_action",
+                            f"Uploaded {', '.join(saved)} but processing failed: {e}",
+                            level="warning",
+                        )
                 st.session_state.pdf_upload_counter += 1
                 st.rerun()
 
@@ -261,12 +632,22 @@ def page_documents():
                                     stale.unlink()
                             st.cache_resource.clear()
                         else:
-                            # Remove this PDF's rows from chunks so source_set stays accurate
                             if chunks_path.exists():
                                 df_chunks = _load_csv_safe(str(chunks_path))
                                 if not df_chunks.empty and "source_file" in df_chunks.columns:
                                     df_chunks = df_chunks[df_chunks["source_file"] != deleted_name]
                                     df_chunks.to_csv(chunks_path, index=False)
+                        st.session_state["generate_confirmed"] = False
+                        try:
+                            from src.ingestion import load_dataset
+                            from src.retrieval import build_index
+                            with st.spinner("Updating knowledge base — please wait..."):
+                                load_dataset.load_dataset()
+                                build_index.build_index()
+                            st.cache_resource.clear()
+                            _queue_message("pdf_action", f"{deleted_name} deleted and knowledge base updated.")
+                        except Exception as e:
+                            _queue_message("pdf_action", f"{deleted_name} deleted but knowledge base update failed: {e}", level="warning")
                         st.rerun()
                 else:
                     if c4.button("Delete", key=f"del_pdf_{p.name}"):
@@ -279,114 +660,105 @@ def page_documents():
 
         st.divider()
 
-        # Step 1
-        st.markdown("**Step 1 — Extract Text Chunks**")
-        st.caption("Splits PDFs into passages. Re-run only after uploading new PDFs. Runs synchronously — do not navigate away until complete.")
-        if not pdf_files:
-            st.info("Upload a PDF first.")
-            st.button("Extract Chunks", disabled=True, use_container_width=True, key="extract_no_pdf")
-        elif chunks_up_to_date:
-            st.success(f"{chunk_count} chunks — up to date.")
-            st.button("Extract Chunks", disabled=True, use_container_width=True, key="extract_ok")
-        else:
-            if chunk_count > 0:
-                df_chk2 = _load_csv_safe(str(chunks_path))
-                chunked_src = set(df_chk2["source_file"].dropna().unique()) if not df_chk2.empty and "source_file" in df_chk2.columns else set()
-                current_src = set(p.name for p in pdf_files)
-                removed = chunked_src - current_src
-                added = current_src - chunked_src
-                reasons = []
-                if removed:
-                    reasons.append(f"{len(removed)} PDF(s) removed")
-                if added:
-                    reasons.append(f"{len(added)} new PDF(s) added")
-                st.warning("; ".join(reasons) + " since last extraction.")
-            else:
-                st.info("Not extracted yet.")
-            if st.button("Extract Chunks from All PDFs", use_container_width=True, type="primary", key="extract_btn"):
-                try:
-                    from src.ingestion import extract_documents
-                    with st.spinner("Extracting..."):
-                        extract_documents.extract_documents()
-                    _cleanup_orphaned_qas(set(p.name for p in pdf_files), drafts_path, approved_path)
-                    # Warn about PDFs that produced no text
-                    df_new_chunks = _load_csv_safe(str(chunks_path))
-                    chunked_sources = set(df_new_chunks["source_file"].dropna().unique()) if not df_new_chunks.empty else set()
-                    zero_chunk = [p.name for p in pdf_files if p.name not in chunked_sources]
-                    if zero_chunk:
-                        st.warning(
-                            f"The following PDF(s) produced no text and cannot be searched — "
-                            f"they may be image-only or password-protected: {', '.join(zero_chunk)}"
-                        )
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Extraction failed: {e}")
-
-        st.divider()
-
-        # Step 2
-        st.markdown("**Step 2 — Build Chunk Index**")
-        st.caption("Makes extracted chunks searchable. Rebuild only after re-extracting. Runs synchronously — do not navigate away until complete.")
-        if chunk_count == 0:
-            st.info("Extract chunks first.")
-            st.button("Build Chunk Index", disabled=True, use_container_width=True, key="chunk_idx_no_chunks")
-        elif chunk_index_up_to_date:
-            st.success(f"Up to date. Last built: {_mtime_label(str(chunk_index_path))}")
-            st.button("Build Chunk Index", disabled=True, use_container_width=True, key="chunk_idx_ok")
-        else:
-            st.warning("Out of date — rebuild to reflect latest chunks.")
-            if st.button("Build Chunk Index", use_container_width=True, type="primary", key="chunk_idx_btn"):
-                try:
-                    from src.retrieval import build_chunk_index
-                    with st.spinner("Building..."):
-                        build_chunk_index.build_chunk_index()
-                    st.cache_resource.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Build failed: {e}")
-
-        st.divider()
-
-        # Step 3
-        st.markdown("**Step 3 — Generate Draft Q&As** *(optional)*")
+        # Generate Q&A Suggestions
+        st.markdown("**Auto-generate Q&A Suggestions**")
         st.caption(
-            "Uses OpenAI to generate Q&A pairs from chunks. This can take several minutes. "
-            "Do not navigate away or refresh — if interrupted, re-running will resume from where it left off."
+            "Uses AI to generate question and answer pairs from your uploaded PDFs. "
+            "This may take several minutes and uses the OpenAI API. "
+            "Please do not navigate away until complete — if interrupted, re-running will pick up where it left off."
         )
         if chunk_count == 0:
-            st.info("Extract chunks first.")
-            st.button("Generate Draft Q&As", disabled=True, use_container_width=True, key="gen_no_chunks")
+            st.info("Upload a PDF first.")
+            st.button("Generate Q&A Suggestions", disabled=True, use_container_width=True, key="gen_no_chunks")
         elif unprocessed == 0:
-            st.success("All chunks processed.")
-            st.button("Generate Draft Q&As", disabled=True, use_container_width=True, key="gen_done")
+            st.success("All PDFs have been processed.")
+            st.button("Generate Q&A Suggestions", disabled=True, use_container_width=True, key="gen_done")
         else:
             st.warning(
-                f"{unprocessed} chunk(s) will be sent to OpenAI — this incurs costs. "
-                "Stay on this page until complete."
+                f"{unprocessed} section(s) not yet processed — generating will use the OpenAI API and may incur costs. "
+                "Please stay on this page until complete."
             )
             confirmed = st.checkbox("I understand this will use the OpenAI API", key="generate_confirmed")
-            if st.button("Generate Draft Q&As", disabled=not confirmed, use_container_width=True, type="primary", key="gen_btn"):
+            if st.button("Generate Q&A Suggestions", disabled=not confirmed, use_container_width=True, type="primary", key="gen_btn"):
                 try:
                     from src.ingestion import generate_draft_qas
-                    with st.spinner(f"Generating Q&A pairs for {unprocessed} chunk(s)... Do not navigate away."):
+                    with st.spinner(f"Generating Q&A pairs for {unprocessed} section(s)... Please wait."):
                         generate_draft_qas.generate_drafts()
-                    st.success("Generation complete — go to PDF Q&A Review to approve pairs.")
+                    st.success("Done — review the suggestions below.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Generation failed: {e}")
 
-        if pending_drafts > 0:
-            st.info(f"**{pending_drafts} draft Q&A(s) ready for review.** Open **PDF Q&A Review** in the sidebar.")
+        st.divider()
 
-    # ── Tab 2: Q&A CSV ────────────────────────────────────────────────────────
+        # ── Inline Q&A Review ─────────────────────────────────────────────────
+        if "draft_skipped" not in st.session_state:
+            st.session_state.draft_skipped = set()
+
+        review_label = (
+            f"**Review Q&A Suggestions** — {pending_drafts} pending"
+            if pending_drafts > 0
+            else "**Review Q&A Suggestions**"
+        )
+        with st.expander(review_label, expanded=pending_drafts > 0):
+            _review_drafts_inline()
+
+        st.divider()
+
+        # Update Knowledge Base (for approved PDF Q&As)
+        st.markdown("**Update Knowledge Base**")
+        st.caption("After reviewing and approving Q&A suggestions, click here to make them searchable.")
+
+        qa_index_path = Path("data/processed/index.faiss")
+        approved_path_kb = Path("data/raw/approved_qas.csv")
+        df_clean_pdf = _load_csv_safe("data/processed/qa_dataset_clean.csv")
+        if not df_clean_pdf.empty and "source_file" in df_clean_pdf.columns:
+            approved_rows = int((~df_clean_pdf["source_file"].str.lower().str.endswith(".csv", na=False)).sum())
+        else:
+            approved_rows = 0
+
+        if approved_rows > 0:
+            st.metric("Approved PDF Q&As in knowledge base", approved_rows)
+
+        approved_newer_than_index = (
+            approved_path_kb.exists()
+            and _row_count(str(approved_path_kb)) > 0
+            and (
+                not qa_index_path.exists()
+                or _mtime(str(approved_path_kb)) > _mtime(str(qa_index_path))
+            )
+        )
+
+        if not approved_path_kb.exists() or _row_count(str(approved_path_kb)) == 0:
+            st.info("No approved Q&As yet — review suggestions first.")
+            st.button("Update Knowledge Base", disabled=True, use_container_width=True, key="update_kb_disabled")
+        elif not approved_newer_than_index:
+            st.success("Knowledge base is up to date.")
+            st.button("Update Knowledge Base", disabled=True, use_container_width=True, key="update_kb_ok")
+        else:
+            st.warning("Approved Q&As have not yet been added to the knowledge base.")
+            if st.button("Update Knowledge Base", use_container_width=True, type="primary", key="update_kb_btn"):
+                try:
+                    from src.ingestion import load_dataset
+                    from src.retrieval import build_index
+                    with st.spinner("Updating knowledge base — please wait..."):
+                        load_dataset.load_dataset()
+                        build_index.build_index()
+                    st.cache_resource.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Update failed: {e}")
+
+    # ── Tab 2: Q&A Files ──────────────────────────────────────────────────────
     with tab_csv:
-        st.subheader("Q&A CSV Upload")
+        st.subheader("Q&A Files")
         st.caption("Upload a CSV with `question` and `answer` columns to add pairs directly to the knowledge base.")
 
         if st.session_state.get("csv_upload_error"):
             st.error(st.session_state.pop("csv_upload_error"))
         for _info in st.session_state.pop("csv_upload_info", []):
             st.info(_info)
+        _show_message("csv_action")
 
         uploaded_qas = st.file_uploader(
             "Choose CSV files",
@@ -463,7 +835,7 @@ def page_documents():
                                 )
                                 if blocked:
                                     info_parts.append(
-                                        f"{blocked} question(s) are in the Deleted Q&As list and will be excluded — restore them first if you want them included"
+                                        f"{blocked} question(s) are in the excluded list and will be skipped — restore them in Knowledge Base if needed"
                                     )
                         if info_parts:
                             st.session_state.setdefault("csv_upload_info", []).append(
@@ -478,6 +850,20 @@ def page_documents():
                 if msgs and not saved:
                     st.session_state["csv_upload_error"] = "\n".join(msgs)
                 if saved:
+                    try:
+                        from src.ingestion import load_dataset
+                        from src.retrieval import build_index
+                        with st.spinner("Adding to knowledge base — please wait..."):
+                            load_dataset.load_dataset()
+                            build_index.build_index()
+                        st.cache_resource.clear()
+                        _queue_message("csv_action", f"Uploaded and added to knowledge base: {', '.join(saved)}")
+                    except Exception as e:
+                        _queue_message(
+                            "csv_action",
+                            f"Uploaded {', '.join(saved)} but knowledge base update failed: {e}",
+                            level="warning",
+                        )
                     st.session_state.csv_upload_counter += 1
                 st.rerun()
 
@@ -491,18 +877,19 @@ def page_documents():
                 ck = f"confirm_del_csv_{p.name}"
                 if st.session_state.get(ck):
                     if c3.button("Confirm", key=f"do_del_csv_{p.name}", type="primary"):
+                        deleted_csv_name = p.name
                         p.unlink()
                         st.session_state.pop(ck, None)
-                        # Rebuild dataset and index to remove deleted CSV's Q&As
                         try:
                             from src.ingestion import load_dataset
                             from src.retrieval import build_index
-                            with st.spinner("Removing Q&As and rebuilding index..."):
+                            with st.spinner("Removing Q&As and updating knowledge base..."):
                                 load_dataset.load_dataset()
                                 build_index.build_index()
                             st.cache_resource.clear()
+                            _queue_message("csv_action", f"{deleted_csv_name} deleted and knowledge base updated.")
                         except Exception as e:
-                            st.warning(f"CSV deleted but index rebuild failed: {e}")
+                            st.warning(f"File deleted but knowledge base update failed: {e}")
                         st.rerun()
                 else:
                     if c3.button("Delete", key=f"del_csv_{p.name}"):
@@ -511,391 +898,366 @@ def page_documents():
             if any(st.session_state.get(f"confirm_del_csv_{p.name}") for p in raw_csvs_display):
                 st.caption("Click **Confirm** to permanently delete.")
         else:
-            st.info("No CSV files uploaded yet.")
+            st.info("No Q&A files uploaded yet.")
 
-    # ── Shared: Build Q&A Index ───────────────────────────────────────────────
-    st.divider()
-    _section_qa_index()
+        st.divider()
 
-
-def _section_qa_index():
-    st.subheader("Final Step — Build Q&A Index")
-    st.caption(
-        "This index is what the assistant searches first. "
-        "It combines approved PDF Q&As (from the PDF Pipeline tab) and manually uploaded CSVs (from the Q&A CSV tab). "
-        "Rebuild it after approving new Q&As in **PDF Q&A Review**, or after adding/removing a CSV. "
-        "Runs synchronously — do not navigate away until complete."
-    )
-
-    qa_index_path = Path("data/processed/index.faiss")
-    approved_path = Path("data/raw/approved_qas.csv")
-
-    # Sources summary — derive counts from qa_dataset_clean.csv (post-dedup, post-exclusion)
-    manual_csvs = [p for p in Path("data/raw").glob("*.csv") if p.name != "approved_qas.csv"]
-    df_clean = _load_csv_safe("data/processed/qa_dataset_clean.csv")
-    if not df_clean.empty and "source_file" in df_clean.columns:
-        approved_rows = int((~df_clean["source_file"].str.lower().str.endswith(".csv", na=False)).sum())
-        manual_rows = int(df_clean["source_file"].str.lower().str.endswith(".csv", na=False).sum())
-    else:
-        approved_rows = 0
-        manual_rows = 0
-
-    src1, src2, src3 = st.columns(3)
-    src1.metric("Approved PDF Q&As", approved_rows)
-    src2.metric("CSV Q&As", manual_rows)
-    src3.metric("Index last built", _mtime_label(str(qa_index_path)))
-
-    has_source_data = (approved_rows + manual_rows) > 0 or bool(manual_csvs)
-    if not has_source_data:
-        st.info(
-            "No Q&A data yet. Upload PDFs and approve generated pairs, or upload a CSV above."
-        )
-        st.button("Build Q&A Index", disabled=True, use_container_width=True, key="build_qa_disabled")
-        return
-
-    all_source_paths = list(Path("data/raw").glob("*.csv"))
-    newest_source_mtime = max(_mtime(str(p)) for p in all_source_paths) if all_source_paths else 0.0
-    qa_index_up_to_date = (
-        qa_index_path.exists()
-        and _mtime(str(qa_index_path)) >= newest_source_mtime
-    )
-
-    if qa_index_up_to_date:
-        indexed_count = _row_count("data/processed/qa_dataset_clean.csv")
-        st.success(
-            f"Q&A index is up to date — **{indexed_count} pairs** indexed. "
-            "Rebuild only after adding new data."
-        )
-    else:
-        st.warning("Q&A index is out of date — new data is available. Rebuild to include it.")
-
-    if st.button(
-        "Rebuild Q&A Index" if qa_index_up_to_date else "Build Q&A Index",
-        use_container_width=True,
-        type="primary",
-        disabled=qa_index_up_to_date,
-        key="build_qa_enabled",
-    ):
-        try:
-            from src.ingestion import load_dataset
-            from src.retrieval import build_index
-            with st.spinner("Step 1/2 — Merging and cleaning Q&A data..."):
-                load_dataset.load_dataset()
-            with st.spinner("Step 2/2 — Building search index..."):
-                build_index.build_index()
-            st.success("Q&A index built. The assistant will now use the updated knowledge base.")
-            st.cache_resource.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Build failed: {e}")
-
-    if "qa_editor_counter" not in st.session_state:
-        st.session_state.qa_editor_counter = 0
-
-    df = _load_csv_safe("data/processed/qa_dataset_clean.csv")
-    if not df.empty:
-        with st.expander("Preview current Q&A dataset"):
-            filter_text = st.text_input("Filter by question", key="kb_filter")
-            if filter_text:
-                df = df[df["question"].str.contains(filter_text, case=False, na=False)]
-            df = df.copy()
-            # Clean up page display
-            if "page" in df.columns:
-                df["page"] = (
-                    df["page"].fillna("").astype(str)
-                    .str.replace(r"^nan$", "", regex=True)
-                    .str.replace(r"\.0$", "", regex=True)
-                )
-            # Derive source type
-            if "source_file" in df.columns:
-                df.insert(
-                    1, "source_type",
-                    df["source_file"].apply(
-                        lambda f: "Manual CSV" if str(f).lower().endswith(".csv") else "PDF"
-                    ),
-                )
-            # Checklist delete
-            df.insert(0, "Delete", False)
-            edited = st.data_editor(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Delete": st.column_config.CheckboxColumn("Delete", default=False)},
-                disabled=[c for c in df.columns if c != "Delete"],
-                key=f"qa_dataset_editor_{st.session_state.qa_editor_counter}",
-            )
-            to_delete = edited[edited["Delete"] == True]
-            if not to_delete.empty:
-                if st.button(
-                    f"Delete {len(to_delete)} selected Q&A(s)",
-                    type="primary",
-                    key="delete_qas_btn",
-                ):
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    new_excl = pd.DataFrame([
-                        {
-                            "question_norm": _norm_q(row["question"]),
-                            "original_question": row.get("question", ""),
-                            "answer": row.get("answer", ""),
-                            "source_file": row.get("source_file", ""),
-                            "excluded_at": now,
-                        }
-                        for _, row in to_delete.iterrows()
-                    ])
-                    if EXCLUDED_PATH.exists():
-                        ex = _load_csv_safe(str(EXCLUDED_PATH))
-                        existing_norms = set(ex["question_norm"]) if not ex.empty and "question_norm" in ex.columns else set()
-                        new_excl = new_excl[~new_excl["question_norm"].isin(existing_norms)]
-                        if not new_excl.empty:
-                            new_excl.to_csv(EXCLUDED_PATH, mode="a", header=False, index=False)
-                    else:
-                        new_excl.to_csv(EXCLUDED_PATH, index=False)
-                    try:
-                        from src.ingestion import load_dataset
-                        from src.retrieval import build_index
-                        with st.spinner("Removing Q&As and rebuilding index..."):
-                            load_dataset.load_dataset()
-                            build_index.build_index()
-                        st.cache_resource.clear()
-                        st.session_state.qa_editor_counter += 1
-                    except Exception as e:
-                        st.error(f"Deletion failed: {e}")
-                    st.rerun()
+        # Summary stat only — full view is in Knowledge Base page
+        df_clean_csv = _load_csv_safe("data/processed/qa_dataset_clean.csv")
+        if not df_clean_csv.empty and "source_file" in df_clean_csv.columns:
+            manual_rows = int(df_clean_csv["source_file"].str.lower().str.endswith(".csv", na=False).sum())
+        else:
+            manual_rows = 0
+        c1, c2 = st.columns(2)
+        c1.metric("Q&As from uploaded files", manual_rows)
+        c2.metric("Last updated", _mtime_label("data/processed/index.faiss"))
+        st.caption("To view or remove individual Q&As, go to **Knowledge Base** in the sidebar.")
 
 
-# ── Page: PDF Q&A Review ──────────────────────────────────────────────────────
+# ── Page: Evaluation ─────────────────────────────────────────────────────────
 
-def page_draft_review():
-    st.header("PDF Q&A Review")
-    st.caption(
-        "Q&A pairs on this page were automatically generated from your uploaded PDFs (via Documents → PDF Documents → Step 3). "
-        "Review each pair and approve or reject it. **Approved pairs are saved to `data/raw/approved_qas.csv`** "
-        "and will be included in the Q&A index the next time you rebuild it from the Documents page."
-    )
+def page_evaluation():
+    st.header("Evaluation")
+    st.caption("Dissertation evidence dashboard — all stats derived from live system data. Reset the query log in Settings before your final evaluation run to ensure clean data.")
 
-    if "draft_skipped" not in st.session_state:
-        st.session_state.draft_skipped = set()
+    # ── Section 1: Knowledge Base Pipeline ───────────────────────────────────
+    # Purpose: shows the methodology — how source documents became a searchable KB.
+    # Useful for the dissertation's implementation/methodology chapter.
+    st.subheader("Knowledge Base Pipeline")
+    st.caption("How source documents were transformed into the searchable knowledge base.")
 
+    raw_docs = Path("data/raw_docs")
+    chunks_path = Path("data/processed/document_chunks.csv")
     drafts_path = Path("data/processed/draft_qas.csv")
-    approved_path = Path("data/raw/approved_qas.csv")
+    kb_path = Path("data/processed/qa_dataset_clean.csv")
 
-    if not drafts_path.exists():
-        st.info(
-            "No draft Q&As found. "
-            "Upload PDFs in **Documents → PDF Documents** and run Step 3 (Generate Draft Q&As)."
+    pdf_count = len(list(raw_docs.glob("*.pdf"))) if raw_docs.exists() else 0
+    chunk_count = _row_count(str(chunks_path))
+
+    generated, approved_n, rejected_n, skipped_n = 0, 0, 0, 0
+    if drafts_path.exists():
+        df_drafts = _load_csv_safe(str(drafts_path))
+        if not df_drafts.empty and "review_status" in df_drafts.columns:
+            generated = int((df_drafts["review_status"] != "skipped").sum())
+            approved_n = int((df_drafts["review_status"] == "approved").sum())
+            rejected_n = int((df_drafts["review_status"] == "rejected").sum())
+            skipped_n = int((df_drafts["review_status"] == "skipped").sum())
+
+    kb_size = _row_count(str(kb_path))
+
+    p1, p2, p3, p4, p5, p6 = st.columns(6)
+    p1.metric("PDF documents", pdf_count, help="Source documents uploaded to the system.")
+    p2.metric("Text passages", chunk_count, help="Segments extracted from PDFs for semantic search.")
+    p3.metric("Q&As generated", generated, help="Q&A pairs produced by AI from the text passages.")
+    p4.metric("Approved", approved_n, help="Pairs reviewed and approved by admin.")
+    p5.metric("Rejected", rejected_n, help="Pairs rejected during review.")
+    p6.metric("In knowledge base", kb_size, help="Final Q&A pairs after deduplication and exclusions.")
+
+    st.caption(f"Pipeline: {pdf_count} PDF(s) → {chunk_count} passages → {generated} Q&As generated → {approved_n} approved → {kb_size} in knowledge base.")
+    if skipped_n > 0:
+        st.caption(f"{skipped_n} passages produced no valid Q&A pairs and were skipped during generation.")
+
+    # ── Query data ────────────────────────────────────────────────────────────
+    log = _load_csv_safe("data/processed/query_log.csv")
+    unanswered = _load_csv_safe("data/processed/unanswered_log.csv")
+
+    if log.empty:
+        st.divider()
+        st.info("No query data yet. Run queries against the system to populate evaluation stats.")
+        return
+
+    if "timestamp" in log.columns:
+        log["timestamp"] = pd.to_datetime(log["timestamp"], errors="coerce")
+    if "qa_score" in log.columns:
+        log["qa_score"] = pd.to_numeric(log["qa_score"], errors="coerce")
+    if "chunk_score" in log.columns:
+        log["chunk_score"] = pd.to_numeric(log["chunk_score"], errors="coerce")
+    if "qa_threshold" in log.columns:
+        log["qa_threshold"] = pd.to_numeric(log["qa_threshold"], errors="coerce")
+
+    total = len(log)
+    qa_matches = log[log["mode"] == "qa_answer"]
+    chunk_matches = log[log["mode"] == "chunk_fallback"]
+    llm_matches = log[log["mode"] == "llm_fallback"]
+    none_matches = log[log["mode"].isin(["no_answer", "none"])]
+
+    # ── Section 2: Query Activity ─────────────────────────────────────────────
+    st.divider()
+    st.subheader("Query Activity")
+
+    if "timestamp" in log.columns and log["timestamp"].notna().any():
+        st.markdown("**Queries over time**")
+        daily = (
+            log.set_index("timestamp")
+            .resample("D")
+            .size()
+            .reset_index(name="queries")
         )
-        return
+        st.line_chart(daily.set_index("timestamp")["queries"])
+    else:
+        st.info("No timestamp data available.")
 
-    df = _load_csv_safe(str(drafts_path))
-    if df.empty:
-        st.info("Draft Q&A file is empty.")
-        return
+    st.markdown("**How queries were answered**")
+    _mode_label_map = {
+        "qa_answer": "Q&A Match",
+        "chunk_fallback": "Passage Search",
+        "llm_fallback": "AI Fallback",
+        "no_answer": "Unanswered",
+        "none": "Unanswered",
+    }
+    _all_methods = ["Q&A Match", "Passage Search", "AI Fallback", "Unanswered"]
+    _raw_counts = log["mode"].map(_mode_label_map).fillna(log["mode"]).value_counts()
+    _mode_counts = pd.DataFrame([
+        {"method": m, "count": int(_raw_counts.get(m, 0))}
+        for m in _all_methods
+    ])
+    if _PLOTLY:
+        _fig = px.pie(
+            _mode_counts,
+            names="method",
+            values="count",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        _fig.update_traces(textposition="inside", textinfo="percent+label")
+        _fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=350)
+        st.plotly_chart(_fig, use_container_width=True)
+    else:
+        st.bar_chart(_mode_counts.set_index("method")["count"])
 
-    if "review_status" not in df.columns:
-        df["review_status"] = "pending"
+    # ── Section 3: Retrieval Performance ─────────────────────────────────────
+    # Purpose: the primary table for the dissertation argument.
+    # Shows what % of queries semantic search handled vs passage search vs AI fallback.
+    # A high Q&A match rate is the main evidence that semantic search works.
+    st.divider()
+    st.subheader("Retrieval Performance")
+    st.caption("The core evidence for your dissertation. Shows how often semantic Q&A matching answered a query without needing AI.")
 
-    # Exclude auto-skipped chunks (no valid pairs generated) from review counts
-    reviewable = df[df["review_status"] != "skipped"]
-    total = len(reviewable)
-    reviewed = int((reviewable["review_status"].isin(["approved", "rejected"])).sum())
-    pending_count = int((reviewable["review_status"] == "pending").sum())
+    mode_data = pd.DataFrame([
+        {"Layer": "Semantic Q&A match",    "Queries": len(qa_matches),    "% of total": f"{len(qa_matches)/total*100:.1f}%",    "What it means": "Directly matched a stored Q&A — no AI needed"},
+        {"Layer": "Semantic passage search","Queries": len(chunk_matches), "% of total": f"{len(chunk_matches)/total*100:.1f}%", "What it means": "Found a relevant PDF passage — no Q&A match"},
+        {"Layer": "AI fallback",            "Queries": len(llm_matches),   "% of total": f"{len(llm_matches)/total*100:.1f}%",   "What it means": "No semantic match — fell back to OpenAI"},
+        {"Layer": "Unanswered",             "Queries": len(none_matches),  "% of total": f"{len(none_matches)/total*100:.1f}%",  "What it means": "No match found and AI disabled or failed"},
+    ])
+    st.dataframe(mode_data, use_container_width=True, hide_index=True)
 
-    st.write(f"**{reviewed} of {total} reviewed — {pending_count} pending**")
-    st.progress(reviewed / total if total else 0)
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Handled by semantic search", f"{(len(qa_matches)+len(chunk_matches))/total*100:.1f}%",
+              help="Queries answered by either Q&A match or passage search — no AI hallucination risk.")
+    r2.metric("Needed AI fallback", f"{len(llm_matches)/total*100:.1f}%",
+              help="Queries where semantic search found nothing and OpenAI was used.")
+    r3.metric("Unanswered", f"{len(none_matches)/total*100:.1f}%",
+              help="Queries that failed all layers.")
+    r4.metric("Total evaluated", total)
 
-    tabs = st.tabs(["Pending", "Approved", "Rejected", "All"])
+    # Match rate over time (shows trend as KB grows)
+    # Purpose: shows that a better-populated KB improves match rates over time.
+    if log["timestamp"].notna().any():
+        st.markdown("**Q&A match rate over time**")
+        st.caption("As the knowledge base grows, the match rate should improve. This supports the argument that semantic search + a well-curated KB is a viable long-term approach.")
+        daily_log = log.copy()
+        daily_log["date"] = daily_log["timestamp"].dt.date
+        daily_total = daily_log.groupby("date").size().rename("total")
+        daily_qa = daily_log[daily_log["mode"] == "qa_answer"].groupby("date").size().rename("qa_match")
+        daily_rate = (daily_qa / daily_total * 100).fillna(0).reset_index()
+        daily_rate.columns = ["date", "Q&A match rate (%)"]
+        st.line_chart(daily_rate.set_index("date"))
 
-    # ── Pending tab ───────────────────────────────────────────────────────────
-    with tabs[0]:
-        pending_df = df[
-            (df["review_status"] == "pending")
-            & (~df.index.isin(st.session_state.draft_skipped))
-        ].copy()
+    # ── Section 3: Match Quality ──────────────────────────────────────────────
+    # Purpose: shows the confidence of semantic matches.
+    # High scores mean the system isn't just returning approximate answers — it's returning good ones.
+    # Score distribution and confidence bands are key dissertation evidence.
+    st.divider()
+    st.subheader("Match Quality")
+    st.caption("How confident were the semantic matches? High scores indicate the system returns genuinely relevant answers, not just the closest approximation.")
 
-        if pending_df.empty:
-            st.success("All pending items have been reviewed or skipped.")
+    if not qa_matches.empty and "qa_score" in qa_matches.columns:
+        scores = qa_matches["qa_score"].dropna()
+        if len(scores) > 0:
+            sq1, sq2, sq3, sq4 = st.columns(4)
+            sq1.metric("Average match score", f"{scores.mean():.3f}", help="Mean similarity score across all Q&A matches.")
+            sq2.metric("Median match score", f"{scores.median():.3f}", help="Half of matches scored above this value.")
+            sq3.metric("Highest score", f"{scores.max():.3f}")
+            sq4.metric("Lowest match score", f"{scores.min():.3f}", help="The weakest match that still passed the threshold.")
+
+            # Confidence bands
+            # Purpose: shows the quality distribution of matches — not just that queries matched, but HOW WELL.
+            # High-confidence matches (>0.85) are the clearest evidence semantic search is working correctly.
+            threshold_val = log["qa_threshold"].dropna().iloc[0] if "qa_threshold" in log.columns and len(log["qa_threshold"].dropna()) > 0 else 0.7
+            high = int((scores >= 0.85).sum())
+            medium = int(((scores >= float(threshold_val)) & (scores < 0.85)).sum())
+            low = int((scores < float(threshold_val)).sum())
+
+            st.markdown("**Confidence bands**")
+            band_df = pd.DataFrame([
+                {"Band": "High confidence  (≥ 0.85)",                              "Q&A matches": high,   "% of matches": f"{high/len(scores)*100:.1f}%",   "Significance": "Strong semantic match — clearly correct answer"},
+                {"Band": f"Medium confidence  (threshold – 0.85)",                 "Q&A matches": medium, "% of matches": f"{medium/len(scores)*100:.1f}%", "Significance": "Good match, above threshold but not near-certain"},
+                {"Band": f"Low confidence  (< threshold, {threshold_val:.2f})",    "Q&A matches": low,    "% of matches": f"{low/len(scores)*100:.1f}%",    "Significance": "Below threshold — these were NOT returned to user"},
+            ])
+            st.dataframe(band_df, use_container_width=True, hide_index=True)
+            st.caption("Note: low-confidence rows are queries that attempted a match but fell below the threshold — they were not served as Q&A answers.")
+
+            # Score distribution histogram
+            # Purpose: visualises the spread of match scores — a cluster near 1.0 strongly supports semantic search.
+            st.markdown("**Score distribution**")
+            st.caption("A distribution skewed toward 1.0 shows the semantic matches are confident, not borderline.")
+            bins = [i * 0.05 for i in range(21)]
+            binned = pd.cut(scores, bins=bins).value_counts().sort_index()
+            hist_df = pd.DataFrame({"score range": [str(b) for b in binned.index], "count": binned.values})
+            st.bar_chart(hist_df.set_index("score range")["count"])
+
+            # Threshold boundary cases
+            # Purpose: shows how many queries were right on the edge of matching.
+            # Helps argue for/against the chosen threshold value.
+            if "qa_threshold" in log.columns and len(log["qa_threshold"].dropna()) > 0:
+                boundary_all = log[(log["qa_score"] - log["qa_threshold"]).abs() < 0.05]
+                boundary_missed = boundary_all[boundary_all["mode"] != "qa_answer"]
+                boundary_matched = boundary_all[boundary_all["mode"] == "qa_answer"]
+                bc1, bc2 = st.columns(2)
+                bc1.metric("Near-miss queries (within 0.05 below threshold)", len(boundary_missed),
+                           help="Queries that almost matched — lowering the threshold would have answered these.")
+                bc2.metric("Borderline matches (within 0.05 above threshold)", len(boundary_matched),
+                           help="Queries that only just passed the threshold — useful for sensitivity analysis.")
+    else:
+        st.info("No Q&A match data yet.")
+
+    # ── Section 4: Query Characteristics ─────────────────────────────────────
+    # Purpose: short, natural-language queries are where semantic search has the biggest advantage.
+    # If short queries still achieve high match rates, that directly argues against keyword search.
+    st.divider()
+    st.subheader("Query Characteristics")
+    st.caption("Short, natural-language queries are where semantic search has the biggest advantage over keyword-based approaches. This table shows match rate by query length.")
+
+    log["word_count"] = log["query"].dropna().str.split().str.len()
+    length_bins   = [0, 2, 4, 7, 11, 100]
+    length_labels = ["1–2 words", "3–4 words", "5–7 words", "8–11 words", "12+ words"]
+    log["length_band"] = pd.cut(log["word_count"], bins=length_bins, labels=length_labels)
+
+    length_rows = []
+    for band in length_labels:
+        subset = log[log["length_band"] == band]
+        n = len(subset)
+        matched = int((subset["mode"] == "qa_answer").sum())
+        length_rows.append({
+            "Query length": band,
+            "Total queries": n,
+            "Q&A matched": matched,
+            "Match rate": f"{matched/n*100:.1f}%" if n > 0 else "n/a",
+            "Why it matters": "Keyword search struggles here" if band in ["1–2 words", "3–4 words"] else "Both approaches can handle these",
+        })
+    st.dataframe(pd.DataFrame(length_rows), use_container_width=True, hide_index=True)
+
+    # Repeated queries
+    # Purpose: shows real usage patterns — repeated queries confirm which topics users actually care about.
+    repeated = log["query"].str.lower().value_counts()
+    repeated = repeated[repeated > 1].reset_index()
+    repeated.columns = ["query", "times asked"]
+    if not repeated.empty:
+        st.markdown("**Repeated queries**")
+        st.caption("Questions asked more than once — confirms these are real user needs, not one-off tests.")
+        st.dataframe(repeated.head(20), use_container_width=True, hide_index=True)
+
+    # ── Section 5: Gap Analysis ───────────────────────────────────────────────
+    # Purpose: intellectually honest — shows where the system fails.
+    # Repeated unanswered queries are the strongest signal of KB gaps.
+    # Important for dissertation to acknowledge limitations.
+    st.divider()
+    st.subheader("Gap Analysis")
+    st.caption("Queries the system could not answer. Shows where the knowledge base has gaps — important for an honest evaluation.")
+
+    if unanswered.empty:
+        st.info("No unanswered queries recorded yet.")
+    else:
+        if "query" in unanswered.columns:
+            repeated_un = unanswered["query"].str.lower().value_counts()
+            repeated_un = repeated_un[repeated_un > 1].reset_index()
+            repeated_un.columns = ["query", "times asked unanswered"]
         else:
-            st.caption(
-                f"{len(pending_df)} pair(s) awaiting review. "
-                "Use checkboxes to select multiple items, then approve or reject them in bulk. "
-                "Or use the individual buttons on each card."
-            )
+            repeated_un = pd.DataFrame()
 
-            # Collect which items are currently checked (from previous rerun)
-            select_all = st.checkbox("Select all", key="select_all_pending")
-            if select_all:
-                selected = list(pending_df.index)
-            else:
-                selected = [idx for idx in pending_df.index if st.session_state.get(f"chk_{idx}", False)]
+        g1, g2 = st.columns(2)
+        g1.metric("Total unanswered queries", len(unanswered),
+                  help="Queries that failed all retrieval layers.")
+        g2.metric("Repeated unanswered queries", len(repeated_un),
+                  help="Asked more than once and never answered — highest priority knowledge base gaps.")
 
-            # Bulk action buttons (read state set on previous rerun)
-            ba1, ba2 = st.columns(2)
-            with ba1:
-                if st.button(
-                    f"Approve selected ({len(selected)})",
-                    disabled=len(selected) == 0,
-                    type="primary",
-                    use_container_width=True,
-                    key="bulk_approve",
-                ):
-                    new_rows = []
-                    for idx in selected:
-                        row = df.loc[idx]
-                        df.loc[idx, "review_status"] = "approved"
-                        new_rows.append({
-                            "question": row.get("question", ""),
-                            "answer": row.get("answer", ""),
-                            "source": row.get("source", ""),
-                            "source_file": row.get("source_file", ""),
-                            "page": row.get("page", ""),
-                        })
-                    df.to_csv(drafts_path, index=False)
-                    if new_rows:
-                        new_df = pd.DataFrame(new_rows)
-                        if approved_path.exists():
-                            new_df.to_csv(approved_path, mode="a", header=False, index=False)
-                        else:
-                            new_df.to_csv(approved_path, index=False)
-                    for idx in selected:
-                        st.session_state.pop(f"chk_{idx}", None)
-                    st.session_state.pop("select_all_pending", None)
-                    st.rerun()
+        if not repeated_un.empty:
+            st.markdown("**Repeated unanswered queries**")
+            st.caption("These are the most important gaps — users keep asking and never get an answer.")
+            st.dataframe(repeated_un, use_container_width=True, hide_index=True)
 
-            with ba2:
-                if st.button(
-                    f"Reject selected ({len(selected)})",
-                    disabled=len(selected) == 0,
-                    use_container_width=True,
-                    key="bulk_reject",
-                ):
-                    for idx in selected:
-                        df.loc[idx, "review_status"] = "rejected"
-                    df.to_csv(drafts_path, index=False)
-                    for idx in selected:
-                        st.session_state.pop(f"chk_{idx}", None)
-                    st.session_state.pop("select_all_pending", None)
-                    st.rerun()
+        st.markdown("**All unanswered queries**")
+        display_cols = [c for c in ["timestamp", "query", "best_qa_score", "best_chunk_score"] if c in unanswered.columns]
+        st.dataframe(unanswered[display_cols], use_container_width=True, hide_index=True)
+        st.download_button(
+            "Export unanswered queries",
+            data=unanswered.to_csv(index=False).encode("utf-8"),
+            file_name="unanswered_queries.csv",
+            mime="text/csv",
+        )
 
-            st.divider()
+    # ── Section 6: Score comparison by mode ──────────────────────────────────
+    # Purpose: shows that Q&A matches have higher confidence scores than passage matches.
+    # This directly argues that the semantic Q&A layer is functioning correctly —
+    # it doesn't just match more queries, it matches them with higher confidence.
+    st.divider()
+    st.subheader("Score Comparison by Mode")
+    st.caption("Average similarity scores for each retrieval layer. Higher Q&A scores vs passage scores shows the semantic Q&A layer is returning more confident, targeted answers.")
 
-            # Individual cards with checkboxes
-            for row_idx, row in pending_df.iterrows():
-                col_chk, col_content = st.columns([0.05, 0.95])
-                with col_chk:
-                    st.checkbox(
-                        "",
-                        key=f"chk_{row_idx}",
-                        value=select_all or st.session_state.get(f"chk_{row_idx}", False),
-                    )
-                with col_content:
-                    st.markdown(f"**Q: {row.get('question', '')}**")
-                    st.write(f"A: {row.get('answer', '')}")
-                    st.caption(
-                        f"Source: {row.get('source_file', '') or 'n/a'} | "
-                        f"Page: {row.get('page', '') or 'n/a'}"
-                    )
-                    ib1, ib2, ib3 = st.columns(3)
-                    with ib1:
-                        if st.button("Approve", key=f"approve_{row_idx}", type="primary"):
-                            df.loc[row_idx, "review_status"] = "approved"
-                            df.to_csv(drafts_path, index=False)
-                            approved_row = pd.DataFrame([{
-                                "question": row.get("question", ""),
-                                "answer": row.get("answer", ""),
-                                "source": row.get("source", ""),
-                                "source_file": row.get("source_file", ""),
-                                "page": row.get("page", ""),
-                            }])
-                            if approved_path.exists():
-                                approved_row.to_csv(approved_path, mode="a", header=False, index=False)
-                            else:
-                                approved_row.to_csv(approved_path, index=False)
-                            st.rerun()
-                    with ib2:
-                        if st.button("Reject", key=f"reject_{row_idx}"):
-                            df.loc[row_idx, "review_status"] = "rejected"
-                            df.to_csv(drafts_path, index=False)
-                            st.rerun()
-                    with ib3:
-                        if st.button("Skip", key=f"skip_{row_idx}"):
-                            st.session_state.draft_skipped.add(row_idx)
-                            st.rerun()
-                st.divider()
+    score_rows = []
+    for mode_val, label in [
+        ("qa_answer", "Semantic Q&A match"),
+        ("chunk_fallback", "Passage search"),
+        ("llm_fallback", "AI fallback"),
+        ("no_answer", "Unanswered"),
+    ]:
+        subset = log[log["mode"].isin([mode_val, "none"]) if mode_val == "no_answer" else log["mode"] == mode_val]
+        avg_qa = subset["qa_score"].dropna().mean() if "qa_score" in subset.columns and len(subset) > 0 else None
+        avg_chunk = subset["chunk_score"].dropna().mean() if "chunk_score" in subset.columns and len(subset) > 0 else None
+        score_rows.append({
+            "Mode": label,
+            "Count": len(subset),
+            "Avg Q&A score": f"{avg_qa:.3f}" if avg_qa is not None and not pd.isna(avg_qa) else "—",
+            "Avg passage score": f"{avg_chunk:.3f}" if avg_chunk is not None and not pd.isna(avg_chunk) else "—",
+        })
+    st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
 
-    # ── Approved tab ──────────────────────────────────────────────────────────
-    with tabs[1]:
-        approved = df[df["review_status"] == "approved"]
-        if approved.empty:
-            st.info("No approved Q&As yet.")
-        else:
-            st.caption(
-                f"{len(approved)} pair(s) approved. "
-                "These are saved in `data/raw/approved_qas.csv` and will be included "
-                "the next time you rebuild the Q&A index."
-            )
-            # Warn about approved Q&As that are excluded from the dataset
-            if EXCLUDED_PATH.exists():
-                ex = _load_csv_safe(str(EXCLUDED_PATH))
-                if not ex.empty and "question_norm" in ex.columns:
-                    excl_norms = set(ex["question_norm"])
-                    excluded_count = int(approved["question"].map(_norm_q).isin(excl_norms).sum())
-                    if excluded_count > 0:
-                        st.warning(
-                            f"{excluded_count} approved Q&A(s) are currently excluded from the dataset. "
-                            "Go to **Deleted Q&As** to restore them."
-                        )
-            display_cols = [c for c in approved.columns if c != "is_useful"]
-            st.dataframe(approved[display_cols], use_container_width=True)
-
-    # ── Rejected tab ──────────────────────────────────────────────────────────
-    with tabs[2]:
-        rejected = df[df["review_status"] == "rejected"]
-        if rejected.empty:
-            st.info("No rejected Q&As yet.")
-        else:
-            display_cols = [c for c in rejected.columns if c != "is_useful"]
-            st.dataframe(rejected[display_cols], use_container_width=True)
-
-    # ── All tab ───────────────────────────────────────────────────────────────
-    with tabs[3]:
-        display_cols = [c for c in df.columns if c != "is_useful"]
-        st.dataframe(df[display_cols], use_container_width=True)
+    st.divider()
+    st.download_button(
+        "Export full query log",
+        data=log.to_csv(index=False).encode("utf-8"),
+        file_name="query_log_full.csv",
+        mime="text/csv",
+    )
 
 
 # ── Page: Settings ────────────────────────────────────────────────────────────
 
 def page_settings():
     st.header("Settings")
-    st.caption("Save to update the `.env` file. Restart the app to apply changes.")
-
-    st.subheader("Current Configuration")
-    st.write(f"**Embedding Model:** {settings.embedding_model}")
-    st.write(f"**Top-K (Q&A):** {settings.top_k}")
-    st.write(f"**Top-K (Chunk):** {settings.chunk_top_k}")
-    st.write(f"**LLM Fallback Enabled:** {settings.llm_fallback_enabled}")
-    st.write(f"**OpenAI Model:** {settings.openai_model}")
-
-    st.subheader("Edit Settings")
+    st.caption("Changes are saved to the `.env` file. Restart the app to apply them.")
 
     new_qa_threshold = st.slider(
-        "Q&A Similarity Threshold",
+        "Q&A match sensitivity",
         min_value=0.0, max_value=1.0,
         value=float(settings.similarity_threshold),
         step=0.01, key="settings_qa_threshold",
+        help="How closely a user's question must match a stored question to return that answer. Higher = stricter.",
     )
     new_chunk_threshold = st.slider(
-        "Chunk Similarity Threshold",
+        "Passage match sensitivity",
         min_value=0.0, max_value=1.0,
         value=float(settings.chunk_similarity_threshold),
         step=0.01, key="settings_chunk_threshold",
+        help="How closely a user's question must match a passage from a PDF to use it as context. Higher = stricter.",
     )
     new_llm_enabled = st.toggle(
-        "LLM Fallback Enabled",
+        "Enable AI fallback",
         value=settings.llm_fallback_enabled,
         key="settings_llm_enabled",
+        help="When no match is found, fall back to the OpenAI model to generate an answer.",
     )
     new_openai_model = st.text_input(
-        "OpenAI Model",
+        "OpenAI model",
         value=settings.openai_model,
         key="settings_openai_model",
     )
@@ -915,257 +1277,91 @@ def page_settings():
 
     st.divider()
 
-    with st.expander("Test a Single Query"):
-        st.caption(
-            "Run a query against the live retriever to see exactly which layer handles it "
-            "and what scores are returned. Useful for tuning thresholds."
-        )
-        retriever = get_admin_retriever()
-        eval_query = st.text_input("Query", key="eval_single_query")
-        if st.button("Run", key="eval_single_run") and eval_query.strip():
-            if retriever is None:
-                st.error("Retriever not available — build the indexes first.")
-            else:
-                result = retriever.search(
-                    eval_query.strip(),
-                    qa_threshold=settings.similarity_threshold,
-                    chunk_threshold=settings.chunk_similarity_threshold,
-                )
-                st.write(f"**Mode:** `{result.get('mode')}`")
-                with st.expander("Q&A Layer", expanded=True):
-                    qa = result.get("qa_result", {})
-                    st.write(f"**ok:** {qa.get('ok')}  |  **reason:** {qa.get('reason', 'n/a')}")
-                    st.write(f"Threshold applied: {settings.similarity_threshold}")
-                    if qa.get("alternatives"):
-                        rows = [
-                            {
-                                "score": r["score"],
-                                "matched_question": r["matched_question"][:80],
-                                "answer": r["answer"][:80],
-                            }
-                            for r in qa["alternatives"]
-                        ]
-                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-                    elif qa.get("best_candidate"):
-                        bc = qa["best_candidate"]
-                        st.write(
-                            f"Best candidate score: {bc['score']:.4f} — "
-                            f"{bc.get('matched_question', '')[:80]}"
-                        )
-                with st.expander("Chunk Layer"):
-                    cr = result.get("chunk_result", {})
-                    st.write(f"**ok:** {cr.get('ok')}  |  **reason:** {cr.get('reason', 'n/a')}")
-                    st.write(f"Threshold applied: {settings.chunk_similarity_threshold}")
-                    if cr.get("results"):
-                        rows = [
-                            {
-                                "score": r["score"],
-                                "chunk_id": r.get("chunk_id", ""),
-                                "text": r["text"][:100],
-                            }
-                            for r in cr["results"]
-                        ]
-                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-                    elif cr.get("best"):
-                        st.write(f"Best chunk score: {cr['best']['score']:.4f}")
-                with st.expander("LLM Layer"):
-                    llm = result.get("llm_result")
-                    if llm:
-                        st.write(
-                            f"**ok:** {llm.get('ok')}  |  "
-                            f"**model:** {llm.get('model')}  |  "
-                            f"**latency:** {llm.get('latency_ms')} ms"
-                        )
-                        st.write(llm.get("answer", ""))
-                    else:
-                        st.write("LLM was not called.")
-
-    with st.expander("Batch Test Runner"):
-        st.caption(
-            "Upload a CSV with `query` and `expected_answer_id` columns to evaluate retrieval accuracy "
-            "across multiple queries at once."
-        )
-        retriever = get_admin_retriever()
-        uploaded_test = st.file_uploader(
-            "Upload test_queries.csv", type=["csv"], key="eval_batch_upload"
-        )
-        if uploaded_test:
-            try:
-                test_df = pd.read_csv(uploaded_test)
-            except Exception as e:
-                st.error(f"Failed to read CSV: {e}")
-                test_df = pd.DataFrame()
-
-            if not test_df.empty:
-                st.dataframe(test_df.head(5), use_container_width=True)
-                if st.button("Run Batch Test", key="eval_batch_run"):
-                    if retriever is None:
-                        st.error("Retriever not available — build the indexes first.")
-                    else:
-                        _run_batch_test(retriever, test_df)
-
-        if st.session_state.get("eval_batch_results"):
-            _display_batch_results(st.session_state.eval_batch_results)
-
-    st.divider()
-
     # ── Reset System ──────────────────────────────────────────────────────────
-    st.subheader("Reset System")
-    st.caption(
-        "Permanently delete uploaded files and/or processed data to start fresh. "
-        "This cannot be undone."
-    )
+    st.subheader("Reset")
+    st.caption("Permanently delete data to start fresh. This cannot be undone.")
 
     reset_opts = st.multiselect(
         "Select what to delete:",
         options=[
-            "PDF files (data/raw_docs/)",
-            "Q&A CSV files (data/raw/)",
-            "Extracted chunks (document_chunks.csv)",
-            "Chunk index (chunk_index.faiss)",
-            "Draft Q&As (draft_qas.csv)",
-            "Approved Q&As (approved_qas.csv)",
-            "Q&A dataset + index (qa_dataset_clean.csv, index.faiss, meta.json)",
+            "PDF files",
+            "Uploaded Q&A files",
+            "Extracted PDF content",
+            "PDF search index",
+            "Q&A suggestions",
+            "Approved Q&As",
+            "Knowledge base",
+            "Query log",
         ],
         key="reset_opts",
     )
 
+    _show_message("reset_action")
+
     if reset_opts:
-        st.warning(
-            f"You have selected **{len(reset_opts)} item(s)** to delete. "
-            "This is permanent and cannot be undone."
-        )
-        if st.button("Reset selected", type="primary", key="reset_confirm_btn"):
-            deleted = []
-            errors = []
+        if st.session_state.get("confirm_reset"):
+            st.error(f"This will permanently delete: **{', '.join(reset_opts)}**. Are you sure?")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Yes, delete permanently", type="primary", key="reset_do_btn"):
+                    deleted = []
+                    errors = []
 
-            def _try_delete(path: str, label: str):
-                p = Path(path)
-                if p.exists():
-                    try:
-                        p.unlink()
-                        deleted.append(label)
-                    except Exception as exc:
-                        errors.append(f"{label}: {exc}")
+                    def _try_delete(path: str, label: str):
+                        p = Path(path)
+                        if p.exists():
+                            try:
+                                p.unlink()
+                                deleted.append(label)
+                            except Exception as exc:
+                                errors.append(f"{label}: {exc}")
 
-            def _try_delete_dir_contents(pattern: str, label: str):
-                files = list(Path(".").glob(pattern))
-                if files:
-                    for f in files:
-                        try:
-                            f.unlink()
-                        except Exception as exc:
-                            errors.append(f"{f.name}: {exc}")
-                    deleted.append(label)
+                    def _try_delete_dir_contents(pattern: str, label: str):
+                        files = list(Path(".").glob(pattern))
+                        if files:
+                            for f in files:
+                                try:
+                                    f.unlink()
+                                except Exception as exc:
+                                    errors.append(f"{f.name}: {exc}")
+                            deleted.append(label)
 
-            if "PDF files (data/raw_docs/)" in reset_opts:
-                _try_delete_dir_contents("data/raw_docs/*.pdf", "PDF files")
-            if "Q&A CSV files (data/raw/)" in reset_opts:
-                _try_delete_dir_contents("data/raw/*.csv", "Q&A CSV files")
-            if "Extracted chunks (document_chunks.csv)" in reset_opts:
-                _try_delete("data/processed/document_chunks.csv", "document_chunks.csv")
-            if "Chunk index (chunk_index.faiss)" in reset_opts:
-                _try_delete("data/processed/chunk_index.faiss", "chunk_index.faiss")
-                _try_delete("data/processed/chunk_meta.json", "chunk_meta.json")
-            if "Draft Q&As (draft_qas.csv)" in reset_opts:
-                _try_delete("data/processed/draft_qas.csv", "draft_qas.csv")
-            if "Approved Q&As (approved_qas.csv)" in reset_opts:
-                _try_delete("data/raw/approved_qas.csv", "approved_qas.csv")
-            if "Q&A dataset + index (qa_dataset_clean.csv, index.faiss, meta.json)" in reset_opts:
-                _try_delete("data/processed/qa_dataset_clean.csv", "qa_dataset_clean.csv")
-                _try_delete("data/processed/index.faiss", "index.faiss")
-                _try_delete("data/processed/meta.json", "meta.json")
+                    if "PDF files" in reset_opts:
+                        _try_delete_dir_contents("data/raw_docs/*.pdf", "PDF files")
+                    if "Uploaded Q&A files" in reset_opts:
+                        _try_delete_dir_contents("data/raw/*.csv", "Uploaded Q&A files")
+                    if "Extracted PDF content" in reset_opts:
+                        _try_delete("data/processed/document_chunks.csv", "Extracted PDF content")
+                    if "PDF search index" in reset_opts:
+                        _try_delete("data/processed/chunk_index.faiss", "PDF search index")
+                        _try_delete("data/processed/chunk_meta.json", "chunk_meta.json")
+                    if "Q&A suggestions" in reset_opts:
+                        _try_delete("data/processed/draft_qas.csv", "Q&A suggestions")
+                    if "Approved Q&As" in reset_opts:
+                        _try_delete("data/raw/approved_qas.csv", "Approved Q&As")
+                    if "Knowledge base" in reset_opts:
+                        _try_delete("data/processed/qa_dataset_clean.csv", "qa_dataset_clean.csv")
+                        _try_delete("data/processed/index.faiss", "index.faiss")
+                        _try_delete("data/processed/meta.json", "meta.json")
+                    if "Query log" in reset_opts:
+                        _try_delete("data/processed/query_log.csv", "query_log.csv")
+                        _try_delete("data/processed/unanswered_log.csv", "unanswered_log.csv")
 
-            st.cache_resource.clear()
-            if deleted:
-                st.success(f"Deleted: {', '.join(deleted)}")
-            if errors:
-                st.error(f"Errors: {'; '.join(errors)}")
-            st.rerun()
-
-
-# ── Page: Query Log ───────────────────────────────────────────────────────────
-
-def page_query_log():
-    st.header("Query Log")
-
-    tab_all, tab_unanswered = st.tabs(["All Queries", "Unanswered Queries"])
-
-    with tab_all:
-        log = _load_csv_safe("data/processed/query_log.csv")
-        if log.empty:
-            st.info("No query log data yet.")
+                    st.cache_resource.clear()
+                    st.session_state.pop("confirm_reset", None)
+                    msg = f"Deleted: {', '.join(deleted)}" if deleted else "Nothing was deleted."
+                    if errors:
+                        msg += f" Errors: {'; '.join(errors)}"
+                    _queue_message("reset_action", msg, level="success" if not errors else "warning")
+                    st.rerun()
+            with c2:
+                if st.button("Cancel", key="reset_cancel_btn"):
+                    st.session_state.pop("confirm_reset", None)
+                    st.rerun()
         else:
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                modes = ["All"] + sorted(log["mode"].dropna().unique().tolist())
-                mode_filter = st.selectbox("Mode", modes, key="log_mode_filter")
-            with fc2:
-                if "timestamp" in log.columns:
-                    log["timestamp"] = pd.to_datetime(log["timestamp"], errors="coerce")
-                    min_date = log["timestamp"].min()
-                    max_date = log["timestamp"].max()
-                    if pd.notna(min_date) and pd.notna(max_date):
-                        date_range = st.date_input(
-                            "Date range",
-                            value=(min_date.date(), max_date.date()),
-                            key="log_date_range",
-                        )
-                    else:
-                        date_range = None
-                else:
-                    date_range = None
-            with fc3:
-                min_score = st.number_input(
-                    "Min QA Score", min_value=0.0, max_value=1.0,
-                    value=0.0, step=0.01, key="log_min_score",
-                )
-
-            filtered = log.copy()
-            if mode_filter != "All":
-                filtered = filtered[filtered["mode"] == mode_filter]
-            if date_range and len(date_range) == 2 and "timestamp" in filtered.columns:
-                start_dt = pd.Timestamp(date_range[0])
-                end_dt = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
-                filtered = filtered[
-                    (filtered["timestamp"] >= start_dt) & (filtered["timestamp"] < end_dt)
-                ]
-            if "qa_score" in filtered.columns and min_score > 0:
-                filtered = filtered[
-                    filtered["qa_score"].fillna(0).astype(float) >= min_score
-                ]
-
-            sm1, sm2, sm3 = st.columns(3)
-            sm1.metric("Total Shown", len(filtered))
-            avg_qa = filtered["qa_score"].dropna().astype(float).mean() if "qa_score" in filtered.columns else 0
-            avg_chunk = filtered["chunk_score"].dropna().astype(float).mean() if "chunk_score" in filtered.columns else 0
-            sm2.metric("Avg QA Score", f"{avg_qa:.4f}" if avg_qa else "n/a")
-            sm3.metric("Avg Chunk Score", f"{avg_chunk:.4f}" if avg_chunk else "n/a")
-
-            st.dataframe(filtered, use_container_width=True)
-            st.download_button(
-                "Export Filtered Results",
-                data=filtered.to_csv(index=False).encode("utf-8"),
-                file_name="query_log_filtered.csv",
-                mime="text/csv",
-            )
-
-    with tab_unanswered:
-        unanswered = _load_csv_safe("data/processed/unanswered_log.csv")
-        if unanswered.empty:
-            st.info("No unanswered queries logged yet.")
-        else:
-            st.caption(
-                "These queries failed both retrieval layers. "
-                "Use them to identify gaps in your knowledge base."
-            )
-            st.dataframe(unanswered, use_container_width=True)
-            st.download_button(
-                "Download Unanswered Log",
-                data=unanswered.to_csv(index=False).encode("utf-8"),
-                file_name="unanswered_log.csv",
-                mime="text/csv",
-            )
+            if st.button("Reset selected", type="primary", key="reset_confirm_btn"):
+                st.session_state["confirm_reset"] = True
+                st.rerun()
 
 
 # ── Batch test helpers ────────────────────────────────────────────────────────
@@ -1227,10 +1423,15 @@ def _display_batch_results(results: list):
     qa_rate = len(qa_attempts) / total * 100
     chunk_rate = sum(1 for r in results if r.get("mode") == "chunk_fallback") / total * 100
 
-    m1, m2, m3 = st.columns(3)
+    llm_rate = sum(1 for r in results if r.get("mode") == "llm_fallback") / total * 100
+    none_rate = sum(1 for r in results if r.get("mode") in ["no_answer", "none"]) / total * 100
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Top-1 Accuracy", f"{top1_acc:.1f}%")
-    m2.metric("Q&A Match Rate", f"{qa_rate:.1f}%")
-    m3.metric("Chunk Fallback Rate", f"{chunk_rate:.1f}%")
+    m2.metric("Q&A Match", f"{qa_rate:.1f}%")
+    m3.metric("Passage Search", f"{chunk_rate:.1f}%")
+    m4.metric("AI Fallback", f"{llm_rate:.1f}%")
+    m5.metric("Unanswered", f"{none_rate:.1f}%")
 
     st.download_button(
         "Download Results CSV",
@@ -1242,80 +1443,175 @@ def _display_batch_results(results: list):
 
 # ── Page: Deleted Q&As ────────────────────────────────────────────────────────
 
-def page_deleted_qas():
-    st.header("Deleted Q&As")
-    st.caption(
-        "Q&A pairs removed from the knowledge base. "
-        "They remain in their source files but are excluded from the dataset. "
-        "Restore to make them active again."
-    )
+def page_knowledge_base():
+    st.header("Knowledge Base")
 
-    if not EXCLUDED_PATH.exists():
-        st.info("No Q&As have been deleted yet.")
-        return
+    if "qa_editor_counter" not in st.session_state:
+        st.session_state.qa_editor_counter = 0
 
-    df = _load_csv_safe(str(EXCLUDED_PATH))
-    if df.empty:
-        st.info("No Q&As have been deleted yet.")
-        return
+    tab_current, tab_deleted = st.tabs(["Current Q&As", "Deleted Q&As"])
 
-    st.write(f"**{len(df)} deleted Q&A(s)**")
+    # ── Tab 1: Current Q&As ───────────────────────────────────────────────────
+    with tab_current:
+        _show_message("qa_dataset_action")
 
-    df_display = df.copy()
-    df_display.insert(0, "Restore", False)
-    edited = st.data_editor(
-        df_display,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"Restore": st.column_config.CheckboxColumn("Restore", default=False)},
-        disabled=[c for c in df_display.columns if c != "Restore"],
-        key="deleted_qas_editor",
-    )
+        df_kb = _load_csv_safe("data/processed/qa_dataset_clean.csv")
+        if df_kb.empty:
+            st.info("No Q&As in the knowledge base yet. Upload PDFs or Q&A files in Documents.")
+            return
 
-    to_restore = edited[edited["Restore"] == True]
-    if not to_restore.empty:
-        if st.button(
-            f"Restore {len(to_restore)} selected Q&A(s)",
-            type="primary",
-            key="restore_qas_btn",
-        ):
-            remaining = df[~df["question_norm"].isin(to_restore["question_norm"])]
-            remaining.to_csv(EXCLUDED_PATH, index=False)
-            try:
-                from src.ingestion import load_dataset
-                from src.retrieval import build_index
-                with st.spinner("Restoring Q&As and rebuilding index..."):
-                    load_dataset.load_dataset()
-                    build_index.build_index()
-                st.cache_resource.clear()
-                st.success(f"Restored {len(to_restore)} Q&A(s).")
-            except Exception as e:
-                st.error(f"Restore failed: {e}")
-            st.rerun()
+        # Summary metrics
+        if "source_file" in df_kb.columns:
+            pdf_count = int((~df_kb["source_file"].str.lower().str.endswith(".csv", na=False)).sum())
+            csv_count = int(df_kb["source_file"].str.lower().str.endswith(".csv", na=False).sum())
+        else:
+            pdf_count, csv_count = 0, 0
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Q&As", len(df_kb))
+        c2.metric("From PDFs", pdf_count)
+        c3.metric("From uploaded files", csv_count)
+
+        st.divider()
+
+        filter_text = st.text_input("Filter by question", key="kb_filter")
+        df_view = df_kb.copy()
+        if filter_text:
+            df_view = df_view[df_view["question"].str.contains(filter_text, case=False, na=False)]
+
+        if "page" in df_view.columns:
+            df_view["page"] = (
+                df_view["page"].fillna("").astype(str)
+                .str.replace(r"^nan$", "", regex=True)
+                .str.replace(r"\.0$", "", regex=True)
+            )
+        if "source_file" in df_view.columns:
+            df_view.insert(
+                1, "source_type",
+                df_view["source_file"].apply(
+                    lambda f: "Uploaded file" if str(f).lower().endswith(".csv") else "PDF"
+                ),
+            )
+        df_view.insert(0, "Delete", False)
+        edited = st.data_editor(
+            df_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Delete": st.column_config.CheckboxColumn("Delete", default=False)},
+            disabled=[c for c in df_view.columns if c != "Delete"],
+            key=f"qa_dataset_editor_{st.session_state.qa_editor_counter}",
+        )
+        to_delete = edited[edited["Delete"] == True]
+        if not to_delete.empty:
+            if st.button(
+                f"Delete {len(to_delete)} selected Q&A(s)",
+                type="primary",
+                key="delete_qas_btn",
+            ):
+                now = datetime.now().strftime("%Y-%m-%d %H:%M")
+                new_excl = pd.DataFrame([
+                    {
+                        "question_norm": _norm_q(row["question"]),
+                        "original_question": row.get("question", ""),
+                        "answer": row.get("answer", ""),
+                        "source_file": row.get("source_file", ""),
+                        "excluded_at": now,
+                    }
+                    for _, row in to_delete.iterrows()
+                ])
+                if EXCLUDED_PATH.exists():
+                    ex = _load_csv_safe(str(EXCLUDED_PATH))
+                    existing_norms = set(ex["question_norm"]) if not ex.empty and "question_norm" in ex.columns else set()
+                    new_excl = new_excl[~new_excl["question_norm"].isin(existing_norms)]
+                    if not new_excl.empty:
+                        new_excl.to_csv(EXCLUDED_PATH, mode="a", header=False, index=False)
+                else:
+                    new_excl.to_csv(EXCLUDED_PATH, index=False)
+                try:
+                    from src.ingestion import load_dataset
+                    from src.retrieval import build_index
+                    with st.spinner("Removing Q&As and updating knowledge base..."):
+                        load_dataset.load_dataset()
+                        build_index.build_index()
+                    st.cache_resource.clear()
+                    st.session_state.qa_editor_counter += 1
+                    _queue_message("qa_dataset_action", f"{len(to_delete)} Q&A(s) removed from the knowledge base.")
+                except Exception as e:
+                    st.error(f"Removal failed: {e}")
+                st.rerun()
+
+    # ── Tab 2: Deleted Q&As ───────────────────────────────────────────────────
+    with tab_deleted:
+        st.caption("Q&As removed from the knowledge base. They remain in their source files but are excluded. Restore to make them active again.")
+        _show_message("restore_action")
+
+        if not EXCLUDED_PATH.exists():
+            st.info("No Q&As have been deleted yet.")
+        else:
+            df_excl = _load_csv_safe(str(EXCLUDED_PATH))
+            if df_excl.empty:
+                st.info("No Q&As have been deleted yet.")
+            else:
+                st.write(f"**{len(df_excl)} deleted Q&A(s)**")
+                df_display = df_excl.copy()
+                df_display.insert(0, "Restore", False)
+                edited_excl = st.data_editor(
+                    df_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"Restore": st.column_config.CheckboxColumn("Restore", default=False)},
+                    disabled=[c for c in df_display.columns if c != "Restore"],
+                    key="deleted_qas_editor",
+                )
+                to_restore = edited_excl[edited_excl["Restore"] == True]
+                if not to_restore.empty:
+                    if st.button(
+                        f"Restore {len(to_restore)} selected Q&A(s)",
+                        type="primary",
+                        key="restore_qas_btn",
+                    ):
+                        remaining = df_excl[~df_excl["question_norm"].isin(to_restore["question_norm"])]
+                        remaining.to_csv(EXCLUDED_PATH, index=False)
+                        try:
+                            from src.ingestion import load_dataset
+                            from src.retrieval import build_index
+                            with st.spinner("Restoring Q&As and updating knowledge base..."):
+                                load_dataset.load_dataset()
+                                build_index.build_index()
+                            st.cache_resource.clear()
+                            _queue_message("restore_action", f"{len(to_restore)} Q&A(s) restored.")
+                        except Exception as e:
+                            st.error(f"Restore failed: {e}")
+                        st.rerun()
 
 
 # ── Navigation ────────────────────────────────────────────────────────────────
 
 PAGES = {
-    "Overview": page_overview,
     "Documents": page_documents,
-    "PDF Q\u0026A Review": page_draft_review,
-    "Deleted Q&As": page_deleted_qas,
+    "Knowledge Base": page_knowledge_base,
+    "Testing": page_testing,
+    "Evaluation": page_evaluation,
     "Settings": page_settings,
-    "Query Log": page_query_log,
 }
 
 with st.sidebar:
     st.title("Admin")
     page = st.radio("Navigate", list(PAGES.keys()), label_visibility="collapsed")
 
-    # Pending review nudge in sidebar
-    drafts_path = Path("data/processed/draft_qas.csv")
-    if drafts_path.exists():
-        df_check = _load_csv_safe(str(drafts_path))
-        if not df_check.empty and "review_status" in df_check.columns:
-            pending = int((df_check["review_status"] == "pending").sum())
-            if pending > 0:
-                st.warning(f"{pending} draft Q&A(s) pending review")
+    # ── System status strip ───────────────────────────────────────────────────
+    st.divider()
+
+    _kb = _load_csv_safe("data/processed/qa_dataset_clean.csv")
+    _kb_size = len(_kb)
+    _log = _load_csv_safe("data/processed/query_log.csv")
+    _query_count = len(_log)
+    _drafts = _load_csv_safe("data/processed/draft_qas.csv")
+    _pending = int((_drafts["review_status"] == "pending").sum()) if not _drafts.empty and "review_status" in _drafts.columns else 0
+
+    st.caption("**System status**")
+    st.caption(f"{'✓' if _kb_size > 0 else '✗'} KB: {_kb_size} Q&As")
+    st.caption(f"Queries logged: {_query_count}")
+    if _pending > 0:
+        st.warning(f"{_pending} Q&A(s) pending review")
 
 PAGES[page]()
