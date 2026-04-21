@@ -7,74 +7,60 @@ Paste each diagram into https://mermaid.live to render and export as PNG/SVG.
 ## Diagram 1: System Component Architecture
 
 ```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '18px'}}}%%
 flowchart TD
     subgraph USER["User Interface"]
-        UA["User App\n(app.py / Streamlit)"]
+        UA["User App (app.py · port 8501)"]
     end
 
     subgraph ADMIN["Admin Interface"]
-        AA["Admin App\n(admin.py / Streamlit)"]
+        AA["Admin App (admin.py · port 8502)"]
     end
 
     subgraph RETRIEVAL["Retrieval Layer"]
-        HR["HybridRetriever\norchestrator"]
-        QR["QARetriever\nsemantic Q&A search"]
-        CR["ChunkRetriever\npassage search"]
-        LLM["LLMFallback\nOpenAI GPT"]
-        KR["KeywordRetriever\nBM25 baseline"]
+        HR["HybridRetriever"]
+        QR["QARetriever (Semantic Q&A)"]
+        CR["ChunkRetriever (Passage Search)"]
+        LLM["LLMFallback (OpenAI GPT)"]
     end
+
+    KR["KeywordRetriever (BM25, testing only)"]
 
     subgraph INDEXES["Vector Indexes (FAISS)"]
-        QI["Q&A Index\nindex.faiss"]
-        CI["Chunk Index\nchunk_index.faiss"]
-    end
-
-    subgraph STORE["Knowledge Base"]
-        KB["Q&A Dataset\nqa_dataset_clean.csv"]
-        CH["Document Chunks\ndocument_chunks.csv"]
-    end
-
-    subgraph INGEST["Ingestion Pipeline"]
-        PDF["PDF Documents\ndata/raw_docs/"]
-        EX["extract_documents\nchunk extraction"]
-        GEN["generate_draft_qas\nOpenAI GPT"]
-        REV["Admin Review\napprove / reject"]
-        LD["load_dataset\nbuild_index"]
+        QI["Q&A Index (index.faiss + meta.json)"]
+        CI["Chunk Index (chunk_index.faiss + chunk_meta.json)"]
     end
 
     subgraph LOG["Logging"]
-        QL["Query Logger\nquery_log.csv"]
-        UL["Unanswered Log\nunanswered_log.csv"]
+        QL["query_log.csv"]
+        UL["unanswered_log.csv"]
     end
 
-    UA -->|"user query"| HR
-    HR --> QR
-    HR --> CR
-    HR --> LLM
-    HR -->|"logs result"| QL
-    HR -->|"logs failures"| UL
+    INGEST["Ingestion Pipeline"]
+    OPENAI[("OpenAI API")]
 
-    QR <-->|"vector search"| QI
-    CR <-->|"vector search"| CI
-    QI --- KB
-    CI --- CH
+    UA -->|"query"| HR
+    HR -->|"1st"| QR
+    HR -->|"2nd"| CR
+    HR -->|"3rd"| LLM
+    HR -->|"all queries"| QL
+    HR -->|"unanswered"| UL
 
-    LLM -->|"OpenAI API"| OPENAI[("OpenAI\nAPI")]
+    QR <-->|"search"| QI
+    CR <-->|"search"| CI
+    CR -.->|"passage context"| LLM
+    LLM --> OPENAI
 
     AA -->|"manages"| INGEST
+    INGEST -->|"builds"| QI
+    INGEST -->|"builds"| CI
+    INGEST --> OPENAI
+
     AA -->|"reads"| QL
     AA -->|"reads"| UL
-    AA -->|"evaluation only"| KR
-    KR --- KB
+    AA -.->|"testing only"| KR
 
-    PDF --> EX
-    EX --> CH
-    EX --> GEN
-    GEN -->|"draft Q&As"| REV
-    REV --> LD
-    LD --> KB
-    LD --> QI
-    LD --> CI
+    KR -.->|"reads"| QI
 ```
 
 ---
@@ -82,34 +68,47 @@ flowchart TD
 ## Diagram 2: Query Flow (Runtime Sequence)
 
 ```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '18px'}}}%%
 flowchart TD
-    A([User submits query]) --> B[HybridRetriever]
+    A([User submits query]) --> HR[HybridRetriever]
+    HR -->|"all queries"| LOG["query_log.csv"]
 
-    B --> C{QARetriever\nSemantic search\nagainst Q&A index}
+    HR --> QR{QARetriever: Search Q&A index}
 
-    C -->|"score ≥ threshold"| D[/"Q&A Match\nReturn stored answer"/]
-    C -->|"score < threshold"| E{ChunkRetriever\nSemantic search\nagainst passage index}
+    QR -->|"score ≥ 0.60"| QA[/"Q&A Match: Stored answer returned"/]
+    QR -->|"score < 0.60"| CR{ChunkRetriever: Search passage index}
 
-    E -->|"score ≥ threshold"| F[/"Passage Search\nReturn relevant passage"/]
-    E -->|"score < threshold"| G{AI Fallback\nenabled?}
+    CR -->|"score ≥ 0.45"| CH[/"Passage Match: Document text returned"/]
+    CR -->|"score < 0.45"| NONE[/"No Match: All layers exhausted"/]
 
-    G -->|"yes"| H[LLMFallback\nOpenAI GPT]
-    G -->|"no"| I[/"Unanswered\nNo result returned"/]
+    NONE -.->|"unanswered"| ULOG["unanswered_log.csv"]
 
-    H -->|"with passage context"| J[/"Grounded AI answer\ngenerated from documents"/]
-    H -->|"no context"| K[/"Ungrounded AI answer\ngenerated from model knowledge"/]
+    QA --> CONF{"Confidence check"}
+    CONF -->|"score ≥ 0.75"| T1[/"Tier 1: Single high-confidence answer"/]
+    CONF -->|"score < 0.75"| T2[/"Tier 2: Ranked candidate list"/]
 
-    D --> L[Log to query_log.csv]
-    F --> L
-    J --> L
-    K --> L
-    I --> M[Log to unanswered_log.csv]
+    CH --> T3[/"Tier 3: Passages found, no direct Q&A match"/]
+    NONE --> T4[/"Tier 4: No match found"/]
 
-    style D fill:#dcfce7,stroke:#16a34a,color:#15803d
-    style F fill:#ede9fe,stroke:#7c3aed,color:#6d28d9
-    style J fill:#ede9fe,stroke:#7c3aed,color:#6d28d9
-    style K fill:#dbeafe,stroke:#2563eb,color:#1d4ed8
-    style I fill:#f3f4f6,stroke:#6b7280,color:#374151
+    T1 -->|"generate (ungrounded)"| GGEN["LLMFallback: generate(query)"]
+    T2 -->|"generate (ungrounded)"| GGEN
+    T4 -->|"user clicks button"| GGEN
+    T3 -->|"user clicks button"| GGRD["LLMFallback: generate(query, context=passages)"]
+
+    GGEN --> R1[/"General AI answer (not grounded in documents)"/]
+    GGRD --> R2[/"Grounded AI answer (based on retrieved passages)"/]
+
+    style QA fill:#dcfce7,stroke:#16a34a,color:#15803d
+    style T1 fill:#dcfce7,stroke:#16a34a,color:#15803d
+    style T2 fill:#fef9c3,stroke:#ca8a04,color:#92400e
+    style CH fill:#ede9fe,stroke:#7c3aed,color:#6d28d9
+    style T3 fill:#ede9fe,stroke:#7c3aed,color:#6d28d9
+    style R2 fill:#ede9fe,stroke:#7c3aed,color:#6d28d9
+    style GGRD fill:#ede9fe,stroke:#7c3aed,color:#6d28d9
+    style R1 fill:#dbeafe,stroke:#2563eb,color:#1d4ed8
+    style GGEN fill:#dbeafe,stroke:#2563eb,color:#1d4ed8
+    style NONE fill:#f3f4f6,stroke:#6b7280,color:#374151
+    style T4 fill:#f3f4f6,stroke:#6b7280,color:#374151
 ```
 
 ---
@@ -117,25 +116,38 @@ flowchart TD
 ## Diagram 3: Ingestion Pipeline
 
 ```mermaid
-flowchart LR
-    A[/"PDF Documents"/] --> B["extract_documents\nSplit into passages"]
-    B --> C[/"Document Chunks\nCSV"/]
-    C --> D["generate_draft_qas\nOpenAI GPT generates\nQ&A pairs per passage"]
-    D --> E[/"Draft Q&As\nCSV"/]
-    E --> F["Admin Review\nApprove / Reject"]
-    F -->|"approved"| G[/"Approved Q&As\nCSV"/]
-    G --> H["load_dataset\nDeduplicate + clean"]
-    H --> I[/"qa_dataset_clean.csv\nFinal knowledge base"/]
-    I --> J["build_index\nSentenceTransformer\n+ FAISS"]
-    J --> K[/"Q&A FAISS Index\nready for search"/]
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '18px'}}}%%
+flowchart TD
+    PDF[/"PDF Documents (data/raw_docs/)"/]
+    CSV[/"Hand-curated Q&A CSVs (data/raw/)"/]
+    EXCL[/"excluded_qas.csv (soft-deletion list)"/]
 
-    C --> L["build_chunk_index\nSentenceTransformer\n+ FAISS"]
-    L --> M[/"Chunk FAISS Index\nready for passage search"/]
+    PDF --> EXT["extract_documents (800-char chunks per page)"]
+    EXT --> CHUNKS[/"document_chunks.csv"/]
 
-    style A fill:#fef9c3,stroke:#ca8a04
-    style I fill:#dcfce7,stroke:#16a34a
-    style K fill:#dbeafe,stroke:#2563eb
-    style M fill:#dbeafe,stroke:#2563eb
+    CHUNKS --> BCI["build_chunk_index (SentenceTransformer + FAISS)"]
+    CHUNKS --> GEN["generate_draft_qas (OpenAI API, resumable)"]
+
+    BCI --> CI[/"Chunk FAISS Index (chunk_index.faiss + chunk_meta.json)"/]
+
+    GEN --> DRAFT[/"draft_qas.csv (status: pending)"/]
+    DRAFT --> REV["Admin Review (approve / reject / skip)"]
+    REV --> APP[/"approved_qas.csv"/]
+
+    APP --> LD["load_dataset (merge, deduplicate, filter exclusions)"]
+    CSV --> LD
+    EXCL -->|"filters out excluded questions"| LD
+
+    LD --> CLEAN[/"qa_dataset_clean.csv"/]
+    CLEAN --> BI["build_index (SentenceTransformer + FAISS)"]
+    BI --> QI[/"Q&A FAISS Index (index.faiss + meta.json)"/]
+
+    style PDF fill:#fef9c3,stroke:#ca8a04
+    style CSV fill:#fef9c3,stroke:#ca8a04
+    style CLEAN fill:#dcfce7,stroke:#16a34a
+    style QI fill:#dbeafe,stroke:#2563eb
+    style CI fill:#dbeafe,stroke:#2563eb
+    style EXCL fill:#fee2e2,stroke:#dc2626
 ```
 
 ---

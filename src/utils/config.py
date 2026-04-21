@@ -32,4 +32,21 @@ def _load_settings() -> Settings:
     )
 
 
-settings = _load_settings()
+class _SettingsProxy:
+    """Proxy so reload_settings() is visible to all importers without re-importing."""
+    def __getattr__(self, name: str):
+        return getattr(_current, name)
+
+    def __repr__(self) -> str:
+        return repr(_current)
+
+
+_current: Settings = _load_settings()
+settings: Settings = _SettingsProxy()  # type: ignore[assignment]
+
+
+def reload_settings() -> None:
+    """Re-read .env and refresh the live settings object in place."""
+    global _current
+    load_dotenv(override=True)
+    _current = _load_settings()

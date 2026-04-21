@@ -14,9 +14,22 @@ REQUIRED_COLUMNS = ["id", "question", "answer", "source", "source_file", "page"]
 
 def build_index():
     if not QA_DATASET_PATH.exists():
+        for p in [INDEX_PATH, META_PATH]:
+            if p.exists():
+                p.unlink()
         raise FileNotFoundError(f"Dataset not found: {QA_DATASET_PATH}")
 
     df = pd.read_csv(QA_DATASET_PATH)
+
+    if df.empty:
+        # Dataset exists but has no rows — clear any stale index so the
+        # retriever correctly reports "no knowledge base" rather than
+        # serving results from the previous index.
+        for p in [INDEX_PATH, META_PATH]:
+            if p.exists():
+                p.unlink()
+        return
+
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
             raise ValueError(f"Missing required column: {col}")

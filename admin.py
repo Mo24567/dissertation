@@ -10,10 +10,13 @@ try:
 except ImportError:
     _PLOTLY = False
 
+import numpy as np
+import faiss
 import pandas as pd
 import streamlit as st
 from dotenv import find_dotenv, set_key
 
+from src.retrieval.model_cache import get_model
 from src.utils.config import settings
 
 st.set_page_config(
@@ -21,6 +24,51 @@ st.set_page_config(
     page_icon="\U0001f527",
     layout="wide",
 )
+
+
+@st.cache_data(show_spinner=False)
+def _compute_kb_coverage_curve():
+    """Compute query coverage (%) at increasing KB sizes using comparison_queries.csv."""
+    qa_path = Path("data/processed/qa_dataset_clean.csv")
+    eval_path = Path("evaluation/comparison_queries.csv")
+
+    if not qa_path.exists() or not eval_path.exists():
+        return None
+
+    qa_df = pd.read_csv(qa_path)
+    eval_df = pd.read_csv(eval_path)
+
+    if qa_df.empty or eval_df.empty or "question" not in qa_df.columns or "query" not in eval_df.columns:
+        return None
+
+    questions = qa_df["question"].dropna().tolist()
+    queries = eval_df["query"].dropna().tolist()
+
+    model = get_model()
+    qa_emb = model.encode(questions, normalize_embeddings=True).astype(np.float32)
+    q_emb = model.encode(queries, normalize_embeddings=True).astype(np.float32)
+
+    threshold = settings.similarity_threshold
+    n_total = len(questions)
+    rng = np.random.default_rng(42)
+    shuffled = rng.permutation(n_total)
+
+    rows = []
+    for pct in range(10, 101, 10):
+        size = max(1, int(n_total * pct / 100))
+        subset = qa_emb[shuffled[:size]]
+        dim = subset.shape[1]
+        idx = faiss.IndexFlatIP(dim)
+        idx.add(subset)
+        scores, _ = idx.search(q_emb, 1)
+        matched = int((scores[:, 0] >= threshold).sum())
+        rows.append({
+            "Q&A pairs in knowledge base": size,
+            "Query coverage (%)": round(matched / len(queries) * 100, 1),
+        })
+
+    return pd.DataFrame(rows)
+
 
 # ── Password protection ──────────────────────────────────────────────────────
 
@@ -224,13 +272,13 @@ def page_testing():
                         st.dataframe(pd.DataFrame(rows), use_container_width=True)
                     elif cr.get("best"):
                         st.write(f"Closest passage score: {cr['best']['score']:.4f}")
-                with st.expander("AI fallback details"):
+                with st.expander("Fallback details"):
                     llm = result.get("llm_result")
                     if llm:
                         st.write(f"**Used:** {llm.get('ok')}  |  **Model:** {llm.get('model')}  |  **Time:** {llm.get('latency_ms')} ms")
                         st.write(llm.get("answer", ""))
                     else:
-                        st.write("AI fallback was not used.")
+                        st.write("Fallback was not used.")
 
     # ── Evaluation Feed ───────────────────────────────────────────────────────
     with st.expander("Evaluation Feed"):
@@ -264,7 +312,6 @@ def page_testing():
                                 if not q:
                                     continue
                                 res = retriever.search(q)
-                                _log_feed_result(q, res)
                                 mode = res.get("mode", "no_answer")
                                 counts[mode] = counts.get(mode, 0) + 1
                                 prog.progress(i / len(feed_df))
@@ -272,7 +319,7 @@ def page_testing():
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Q&A Match", counts.get("qa_answer", 0))
                             c2.metric("Passage Search", counts.get("chunk_fallback", 0))
-                            c3.metric("AI Fallback", counts.get("llm_fallback", 0))
+                            c3.metric("Generated Answer", counts.get("llm_fallback", 0))
                             c4.metric("Unanswered", counts.get("no_answer", 0))
 
     # ── BM25 vs Semantic Comparison ───────────────────────────────────────────
@@ -280,7 +327,7 @@ def page_testing():
         st.caption(
             "Upload a CSV with `query` and `expected_question` columns. "
             "Runs each query through keyword search (BM25) and semantic Q&A search only — "
-            "no passage search or AI fallback. Measures accuracy of each method head-to-head. "
+            "no passage search or generated answer fallback. Measures accuracy of each method head-to-head. "
             "`expected_question` should be the exact question text from your knowledge base."
         )
         kw_retriever = get_keyword_retriever()
@@ -360,10 +407,10 @@ def page_testing():
         )
         retriever = get_admin_retriever()
         include_llm = st.checkbox(
-            "Include AI fallback (uses OpenAI API)",
+            "Include generated answer fallback (uses OpenAI API)",
             value=False,
             key="capture_llm",
-            help="If unchecked, queries that reach the AI fallback layer will show as Unanswered instead.",
+            help="If unchecked, queries that reach the fallback layer will show as Unanswered instead.",
         )
         uploaded_cap = st.file_uploader("Upload queries CSV", type=["csv"], key="cap_upload")
         if uploaded_cap:
@@ -385,7 +432,7 @@ def page_testing():
                             _mode_labels = {
                                 "qa_answer": "Q&A Match",
                                 "chunk_fallback": "Passage Search",
-                                "llm_fallback": "AI Fallback",
+                                "llm_fallback": "Generated Answer",
                                 "no_answer": "Unanswered",
                             }
                             rows = []
@@ -410,7 +457,7 @@ def page_testing():
                                     "layer": _mode_labels.get(mode, mode),
                                     "Q&A answer": qa_answer,
                                     "Passage returned": passage_text,
-                                    "AI answer": ai_answer,
+                                    "Generated answer": ai_answer,
                                     "Correct?": "",
                                 })
                                 prog.progress(i / len(cap_df))
@@ -424,7 +471,7 @@ def page_testing():
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Q&A Match", sum(1 for r in rows if r["layer"] == "Q&A Match"))
             c2.metric("Passage Search", sum(1 for r in rows if r["layer"] == "Passage Search"))
-            c3.metric("AI Fallback", sum(1 for r in rows if r["layer"] == "AI Fallback"))
+            c3.metric("Generated Answer", sum(1 for r in rows if r["layer"] == "Generated Answer"))
             c4.metric("Unanswered", sum(1 for r in rows if r["layer"] == "Unanswered"))
             st.download_button(
                 "Export for manual annotation",
@@ -549,14 +596,17 @@ def _review_drafts_inline():
     # ── Pending ───────────────────────────────────────────────────────────────
     with tabs[0]:
         _show_message("review_action")
-        pending_df = df[
-            (df["review_status"] == "pending")
-            & (~df.index.isin(st.session_state.draft_skipped))
-        ].copy()
+        pending_df = df[df["review_status"] == "pending"].copy()
 
         if pending_df.empty:
             st.success("All suggestions have been reviewed.")
         else:
+            search_q = st.text_input("Search questions", placeholder="Filter by keyword…", key="review_search")
+            if search_q:
+                pending_df = pending_df[
+                    pending_df["question"].str.contains(search_q, case=False, na=False)
+                ]
+
             st.caption(
                 f"{len(pending_df)} suggestion(s) awaiting review. "
                 "Select items using checkboxes and approve or reject in bulk, or use the buttons on each card."
@@ -623,9 +673,10 @@ def _review_drafts_inline():
                 col_chk, col_content = st.columns([0.05, 0.95])
                 with col_chk:
                     st.checkbox(
-                        "",
+                        "Select",
                         key=f"chk_{row_idx}",
                         value=select_all or st.session_state.get(f"chk_{row_idx}", False),
+                        label_visibility="hidden",
                     )
                 with col_content:
                     st.markdown(f"**Q: {row.get('question', '')}**")
@@ -660,7 +711,8 @@ def _review_drafts_inline():
                             st.rerun()
                     with ib3:
                         if st.button("Skip", key=f"skip_{row_idx}"):
-                            st.session_state.draft_skipped.add(row_idx)
+                            df.loc[row_idx, "review_status"] = "skipped"
+                            df.to_csv(drafts_path, index=False)
                             _queue_message("review_action", "Q&A skipped.", level="info")
                             st.rerun()
                 st.divider()
@@ -912,7 +964,7 @@ def page_documents():
         # Generate Q&A Suggestions
         st.markdown("**Auto-generate Q&A Suggestions**")
         st.caption(
-            "Uses AI to generate question and answer pairs from your uploaded PDFs. "
+            "Automatically generates question and answer pairs from your uploaded PDFs. "
             "This may take several minutes and uses the OpenAI API. "
             "Please do not navigate away until complete — if interrupted, re-running will pick up where it left off."
         )
@@ -922,28 +974,40 @@ def page_documents():
         elif unprocessed == 0:
             st.success("All PDFs have been processed.")
             st.button("Generate Q&A Suggestions", disabled=True, use_container_width=True, key="gen_done")
+        elif st.session_state.get("generating_qas"):
+            st.button("Generating Q&A Suggestions…", disabled=True, use_container_width=True, key="gen_running")
+            progress_bar = st.progress(0.0, text="Starting — processing sections…")
+
+            def _on_progress(done: int, total: int) -> None:
+                pct = done / total
+                progress_bar.progress(pct, text=f"Processing section {done} of {total}…")
+
+            _gen_error = None
+            try:
+                from src.ingestion import generate_draft_qas
+                generate_draft_qas.generate_drafts(on_progress=_on_progress)
+                progress_bar.progress(1.0, text="Complete!")
+            except Exception as _e:
+                _gen_error = _e
+
+            st.session_state.pop("generating_qas", None)
+            if _gen_error:
+                st.error(f"Generation failed: {_gen_error}")
+            else:
+                st.rerun()
         else:
             st.warning(
-                f"{unprocessed} section(s) not yet processed — generating will use the OpenAI API and may incur costs. "
+                f"{unprocessed} section(s) not yet processed — generating may incur API costs. "
                 "Please stay on this page until complete."
             )
-            confirmed = st.checkbox("I understand this will use the OpenAI API", key="generate_confirmed")
+            confirmed = st.checkbox("I understand this may incur API costs", key="generate_confirmed")
             if st.button("Generate Q&A Suggestions", disabled=not confirmed, use_container_width=True, type="primary", key="gen_btn"):
-                try:
-                    from src.ingestion import generate_draft_qas
-                    with st.spinner(f"Generating Q&A pairs for {unprocessed} section(s)... Please wait."):
-                        generate_draft_qas.generate_drafts()
-                    st.success("Done — review the suggestions below.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Generation failed: {e}")
+                st.session_state["generating_qas"] = True
+                st.rerun()
 
         st.divider()
 
         # ── Inline Q&A Review ─────────────────────────────────────────────────
-        if "draft_skipped" not in st.session_state:
-            st.session_state.draft_skipped = set()
-
         review_label = (
             f"**Review Q&A Suggestions** — {pending_drafts} pending"
             if pending_drafts > 0
@@ -1197,7 +1261,7 @@ def page_evaluation():
     p1, p2, p3, p4, p5, p6 = st.columns(6)
     p1.metric("PDF documents", pdf_count, help="Source documents uploaded to the system.")
     p2.metric("Text passages", chunk_count, help="Segments extracted from PDFs for semantic search.")
-    p3.metric("Q&As generated", generated, help="Q&A pairs produced by AI from the text passages.")
+    p3.metric("Q&As generated", generated, help="Q&A pairs generated from the text passages.")
     p4.metric("Approved", approved_n, help="Pairs reviewed and approved by admin.")
     p5.metric("Rejected", rejected_n, help="Pairs rejected during review.")
     p6.metric("In knowledge base", kb_size, help="Final Q&A pairs after deduplication and exclusions.")
@@ -1250,11 +1314,11 @@ def page_evaluation():
     _mode_label_map = {
         "qa_answer": "Q&A Match",
         "chunk_fallback": "Passage Search",
-        "llm_fallback": "AI Fallback",
+        "llm_fallback": "Generated Answer",
         "no_answer": "Unanswered",
         "none": "Unanswered",
     }
-    _all_methods = ["Q&A Match", "Passage Search", "AI Fallback", "Unanswered"]
+    _all_methods = ["Q&A Match", "Passage Search", "Generated Answer", "Unanswered"]
     _raw_counts = log["mode"].map(_mode_label_map).fillna(log["mode"]).value_counts()
     _mode_counts = pd.DataFrame([
         {"method": m, "count": int(_raw_counts.get(m, 0))}
@@ -1275,41 +1339,68 @@ def page_evaluation():
 
     # ── Section 3: Retrieval Performance ──────────────────────────────────────
     # Purpose: the primary table for the dissertation argument.
-    # Shows what % of queries semantic search handled vs passage search vs AI fallback.
+    # Shows what % of queries semantic search handled vs passage search vs generated answer fallback.
     # A high Q&A match rate is the main evidence that semantic search works.
     st.divider()
     st.subheader("Retrieval Performance")
-    st.caption("The core evidence for your dissertation. Shows how often semantic Q&A matching answered a query without needing AI.")
+    st.caption("The core evidence for your dissertation. Shows how often semantic Q&A matching answered a query without needing a generated answer.")
 
     mode_data = pd.DataFrame([
-        {"Layer": "Semantic Q&A match",    "Queries": len(qa_matches),    "% of total": f"{len(qa_matches)/total*100:.1f}%",    "What it means": "Directly matched a stored Q&A — no AI needed"},
+        {"Layer": "Semantic Q&A match",    "Queries": len(qa_matches),    "% of total": f"{len(qa_matches)/total*100:.1f}%",    "What it means": "Directly matched a stored Q&A — no generation needed"},
         {"Layer": "Semantic passage search","Queries": len(chunk_matches), "% of total": f"{len(chunk_matches)/total*100:.1f}%", "What it means": "Found a relevant PDF passage — no Q&A match"},
-        {"Layer": "AI fallback",            "Queries": len(llm_matches),   "% of total": f"{len(llm_matches)/total*100:.1f}%",   "What it means": "No semantic match — fell back to OpenAI"},
-        {"Layer": "Unanswered",             "Queries": len(none_matches),  "% of total": f"{len(none_matches)/total*100:.1f}%",  "What it means": "No match found and AI disabled or failed"},
+        {"Layer": "Generated answer",       "Queries": len(llm_matches),   "% of total": f"{len(llm_matches)/total*100:.1f}%",   "What it means": "No semantic match — fell back to generated answer"},
+        {"Layer": "Unanswered",             "Queries": len(none_matches),  "% of total": f"{len(none_matches)/total*100:.1f}%",  "What it means": "No match found and fallback disabled or failed"},
     ])
     st.dataframe(mode_data, use_container_width=True, hide_index=True)
 
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Handled by semantic search", f"{(len(qa_matches)+len(chunk_matches))/total*100:.1f}%",
-              help="Queries answered by either Q&A match or passage search — no AI hallucination risk.")
-    r2.metric("Needed AI fallback", f"{len(llm_matches)/total*100:.1f}%",
-              help="Queries where semantic search found nothing and OpenAI was used.")
-    r3.metric("Unanswered", f"{len(none_matches)/total*100:.1f}%",
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("Semantic Q&A match", f"{len(qa_matches)/total*100:.1f}%",
+              help="Queries directly matched to a stored Q&A — no generation needed.")
+    r2.metric("Passage search", f"{len(chunk_matches)/total*100:.1f}%",
+              help="Queries answered via a relevant PDF passage — no Q&A match found.")
+    r3.metric("Generated answer", f"{len(llm_matches)/total*100:.1f}%",
+              help="Queries where semantic search found nothing and the fallback was used.")
+    r4.metric("Unanswered", f"{len(none_matches)/total*100:.1f}%",
               help="Queries that failed all layers.")
-    r4.metric("Total evaluated", total)
+    r5.metric("Total evaluated", total)
 
-    # Match rate over time (shows trend as KB grows)
-    # Purpose: shows that a better-populated KB improves match rates over time.
-    if log["timestamp"].notna().any():
-        st.markdown("**Q&A match rate over time**")
-        st.caption("As the knowledge base grows, the match rate should improve. This supports the argument that semantic search + a well-curated KB is a viable long-term approach.")
-        daily_log = log.copy()
-        daily_log["date"] = daily_log["timestamp"].dt.date
-        daily_total = daily_log.groupby("date").size().rename("total")
-        daily_qa = daily_log[daily_log["mode"] == "qa_answer"].groupby("date").size().rename("qa_match")
-        daily_rate = (daily_qa / daily_total * 100).fillna(0).reset_index()
-        daily_rate.columns = ["date", "Q&A match rate (%)"]
-        st.line_chart(daily_rate.set_index("date"))
+    # KB coverage curve
+    # Purpose: shows that query coverage improves as the KB grows.
+    # Argues that the unanswered log feedback loop drives adaptability — each time an admin
+    # adds Q&A pairs in response to the unanswered log, the system moves right along this curve.
+    st.markdown("**Knowledge base growth vs. query coverage**")
+    st.caption(
+        "Each point shows the % of test queries answered at a given KB size. "
+        "As admins use the unanswered log to add Q&A pairs, coverage improves — "
+        "a feedback loop that static systems lack."
+    )
+    with st.spinner("Computing coverage curve…"):
+        coverage_df = _compute_kb_coverage_curve()
+    if coverage_df is not None:
+        if _PLOTLY:
+            fig = px.line(
+                coverage_df,
+                x="Q&A pairs in knowledge base",
+                y="Query coverage (%)",
+                markers=True,
+                labels={
+                    "Q&A pairs in knowledge base": "Q&A pairs in knowledge base",
+                    "Query coverage (%)": "Query coverage (%)",
+                },
+            )
+            fig.update_layout(yaxis_range=[0, 100])
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.line_chart(coverage_df.set_index("Q&A pairs in knowledge base"))
+        final_coverage = coverage_df["Query coverage (%)"].iloc[-1]
+        baseline_coverage = coverage_df["Query coverage (%)"].iloc[0]
+        gain = final_coverage - baseline_coverage
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Coverage at 10% KB", f"{baseline_coverage:.1f}%", help="Match rate with only 10% of Q&A pairs loaded.")
+        cc2.metric("Coverage at full KB", f"{final_coverage:.1f}%", help="Match rate with all current Q&A pairs.")
+        cc3.metric("Coverage gain", f"+{gain:.1f}pp", help="Percentage point improvement from growing the KB.")
+    else:
+        st.info("Coverage curve unavailable — requires qa_dataset_clean.csv and evaluation/comparison_queries.csv.")
 
     # ── Section 4: Match Quality ──────────────────────────────────────────────
     # Purpose: shows the confidence of semantic matches.
@@ -1456,7 +1547,7 @@ def page_evaluation():
     for mode_val, label in [
         ("qa_answer", "Semantic Q&A match"),
         ("chunk_fallback", "Passage Search"),
-        ("llm_fallback", "AI fallback"),
+        ("llm_fallback", "Generated answer"),
         ("no_answer", "Unanswered"),
     ]:
         subset = log[log["mode"].isin([mode_val, "none"]) if mode_val == "no_answer" else log["mode"] == mode_val]
@@ -1500,10 +1591,10 @@ def page_settings():
         help="How closely a user's question must match a passage from a PDF to use it as context. Higher = stricter.",
     )
     new_llm_enabled = st.toggle(
-        "Enable AI fallback",
+        "Enable generated answer fallback",
         value=settings.llm_fallback_enabled,
         key="settings_llm_enabled",
-        help="When no match is found, fall back to the OpenAI model to generate an answer.",
+        help="When no match is found, fall back to generate an answer.",
     )
     new_openai_model = st.text_input(
         "OpenAI model",
@@ -1520,7 +1611,10 @@ def page_settings():
             set_key(dotenv_path, "CHUNK_SIMILARITY_THRESHOLD", str(new_chunk_threshold))
             set_key(dotenv_path, "LLM_FALLBACK_ENABLED", str(new_llm_enabled).lower())
             set_key(dotenv_path, "OPENAI_MODEL", new_openai_model)
-            st.success("Settings saved. Restart the app to apply changes.")
+            from src.utils.config import reload_settings
+            reload_settings()
+            st.cache_resource.clear()
+            st.success("Settings saved and applied.")
         except Exception as e:
             st.error(f"Failed to save settings: {e}")
 

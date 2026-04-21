@@ -131,7 +131,13 @@ def _call_openai(client: OpenAI, chunk: dict) -> tuple:
     return chunk, data.get("qas", [])
 
 
-def generate_drafts():
+def generate_drafts(on_progress=None):
+    """Generate draft Q&A pairs from unprocessed chunks.
+
+    Args:
+        on_progress: optional callable(completed: int, total: int) called after
+                     each chunk finishes, suitable for driving a UI progress bar.
+    """
     if not CHUNKS_PATH.exists():
         print(f"Chunks file not found: {CHUNKS_PATH}")
         return
@@ -218,6 +224,9 @@ def generate_drafts():
                 })
 
             print(f"[{completed}/{total}] {chunk['chunk_id']} — {count} pairs")
+
+            if on_progress is not None:
+                on_progress(completed, total)
 
             if completed % SAVE_INTERVAL == 0:
                 _flush_buffer(buffer)
