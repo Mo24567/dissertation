@@ -4,7 +4,7 @@ import streamlit as st
 from src.retrieval.hybrid_query import HybridRetriever
 
 st.set_page_config(
-    page_title="Loughborough University Student Assistant",
+    page_title="Semantic Q&A Assistant",
     page_icon="\U0001f393",
     layout="centered",
 )
@@ -12,14 +12,20 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-.block-container { max-width: 720px; padding-top: 3rem; }
+.block-container { max-width: 680px; padding-top: 4rem; padding-bottom: 4rem; padding-left: 1rem; padding-right: 1rem; }
 
+.app-header {
+    text-align: center;
+    margin-bottom: 2.5rem;
+    padding-right: 2rem;
+}
 .app-title {
-    font-size: 1.8rem; font-weight: 600;
-    letter-spacing: -0.01em; margin-bottom: 0.25rem;
+    font-size: 2rem; font-weight: 700;
+    letter-spacing: -0.02em; margin-bottom: 0.5rem;
+    line-height: 1.2;
 }
 .app-subtitle {
-    font-size: 0.95rem; opacity: 0.5; margin-bottom: 2.5rem;
+    font-size: 0.95rem; opacity: 0.5; line-height: 1.6;
 }
 
 /* ── Answer card (tier 1 — high confidence Q&A) ── */
@@ -143,12 +149,23 @@ st.markdown(
 .trail-warn { color: #d97706; }
 .trail-skip { color: #9ca3af; }
 
+/* ── Search form ── */
+.stTextInput input {
+    border-radius: 10px !important;
+    font-size: 1rem !important;
+    padding: 0.65rem 1rem !important;
+}
+.stForm { border: none !important; padding: 0 !important; }
+
 /* ── Misc ── */
 .section-heading {
     font-size: 0.78rem; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.06em; opacity: 0.4; margin-bottom: 0.75rem;
 }
-.empty-state { text-align: center; padding: 4rem 1rem; opacity: 0.35; }
+.empty-state {
+    text-align: center; padding: 5rem 1rem; opacity: 0.35;
+    font-size: 0.95rem; line-height: 1.6;
+}
 
 /* ── Dark mode ── */
 @media (prefers-color-scheme: dark) {
@@ -213,10 +230,11 @@ for _key, _default in [
         st.session_state[_key] = _default
 
 # ── Header ───────────────────────────────────────────────────────────────────
-st.markdown('<div class="app-title">Loughborough Student Assistant</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="app-subtitle">Ask a question about fees, accommodation, attendance,<br>'
-    "assessments or university regulations.</div>",
+    '<div class="app-header">'
+    '<div class="app-title">Semantic Q&amp;A Assistant</div>'
+    '<div class="app-subtitle">Ask a question and get answers drawn directly from your organisation\'s documents.</div>'
+    "</div>",
     unsafe_allow_html=True,
 )
 
@@ -452,8 +470,7 @@ def _render_no_match(streak: int = 0):
         hint = (
             '<p style="margin-top:0.75rem;margin-bottom:0;font-size:0.85rem;opacity:0.6;">'
             "Still not finding what you need? Try rephrasing your question using different "
-            "keywords, or visit <a href='https://www.lboro.ac.uk' target='_blank'>lboro.ac.uk</a> "
-            "for official information."
+            "keywords, or check the original source documents directly."
             "</p>"
         )
     st.markdown(
@@ -491,8 +508,8 @@ def _render_llm_answer(llm_result: dict, llm_type: str):
   <span class="result-mode-badge badge-grounded">Answer from your documents</span>
   <p>{answer_esc}</p>
   <div class="llm-disclaimer">
-    Generated using passages from uploaded university documents.
-    Always verify important information at lboro.ac.uk
+    Generated using passages from your uploaded documents.
+    Always verify important information against the original source.
   </div>
 </div>""",
             unsafe_allow_html=True,
@@ -505,8 +522,8 @@ def _render_llm_answer(llm_result: dict, llm_type: str):
   <p>{answer_esc}</p>
   <div class="llm-disclaimer">
     This answer was generated automatically and has not been verified
-    against official university sources. Always confirm important information
-    at lboro.ac.uk
+    against official sources. Always confirm important information
+    with the relevant organisation directly.
   </div>
 </div>""",
             unsafe_allow_html=True,
@@ -525,7 +542,10 @@ if st.session_state.get("search_error"):
 
 elif result is None:
     st.markdown(
-        '<div class="empty-state"><p>Enter a question above to get started.</p></div>',
+        '<div class="empty-state">'
+        "<p>Type a question above and press Search.</p>"
+        "<p>Try asking about attendance, fees, accommodation, or assessments.</p>"
+        "</div>",
         unsafe_allow_html=True,
     )
 

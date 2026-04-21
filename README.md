@@ -1,6 +1,6 @@
-# Loughborough Student Assistant
+# Semantic Q&A Assistant
 
-A semantic Q&A assistant for Loughborough University students. Ask questions about fees, accommodation, attendance, assessments, and university regulations. Answers are drawn directly from official university documents.
+A document-grounded Q&A system that answers questions using an organisation's own uploaded documents. Admins build a knowledge base from PDFs and curated Q&A pairs; users query it through a semantic search interface. Answers are drawn directly from the uploaded content.
 
 ## Overview
 
@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 ## Running the apps
 
-**Student assistant** (port 8501):
+**User interface** (port 8501):
 ```bash
 streamlit run app.py
 ```
@@ -49,7 +49,7 @@ streamlit run admin.py --server.port 8502
 
 ## Admin workflow
 
-1. **Upload PDFs** - go to Documents and upload university PDF documents.
+1. **Upload PDFs** - go to Documents and upload your organisation's PDF documents.
 2. **Generate Q&A suggestions** - the system extracts text passages and generates question and answer pairs via the OpenAI API.
 3. **Review suggestions** - approve or reject generated pairs in the review panel.
 4. **Rebuild the index** - approved pairs are embedded and indexed, making them searchable.
@@ -58,7 +58,7 @@ streamlit run admin.py --server.port 8502
 ## Project structure
 
 ```
-app.py                        # Student-facing assistant
+app.py                        # User-facing assistant
 admin.py                      # Admin dashboard
 
 src/
